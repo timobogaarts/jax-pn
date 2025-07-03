@@ -1,0 +1,16 @@
+[build-system]
+requires = ["hatchling >= 1.26"]
+build-backend = "hatchling.build"
+
+[project]
+name = 'bbax'
+version= '0.0.1'
+description = "Python package utilities for 1D Breeding Blanket Simulations using autodiff PN"
+readme= "README.md"
+authors = [{name = "Timo Bogaarts", email = "t.j.bogaarts@tue.nl"}]
+dependencies = [
+          "numpy",          
+          "h5py",          
+          "scipy"          
+        ]
+requires-python = ">3.7"

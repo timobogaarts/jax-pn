@@ -1,0 +1,6 @@
+build/*
+.vscode/*
+*.vtk
+*.json
+**/__pycache__/*
+pybind11/*
