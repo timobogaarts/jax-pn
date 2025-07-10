@@ -114,7 +114,7 @@ def Create_DPN_Matrix_From_Regions(element : basix.finite_element.FiniteElement,
     return *assemble_DPN_matrix(element, nodes, sigma_t, sigma_s, q, N_max, bc, L_scat=L_scat), nodes
 
 
-def assemble_DPN_matrix(element : basix.finite_element.FiniteElement, nodes : np.ndarray, sigma_t : Iterable[float], sigma_s : List[np.ndarray], q : List[np.ndarray], N_max : int, bc : Literal["marshak", "reflective"], L_scat : int = None):
+def assemble_DPN_matrix(element : basix.finite_element.FiniteElement, nodes : np.ndarray, sigma_t : Iterable[float], sigma_s : List[np.ndarray], q : List[np.ndarray], N_max : int, bc : Literal["marshak", "reflective"], L_scat : int = None, solutions_higher_eg  :  List):
     '''
     Assemble the finite element matrix and right-hand side vector for the 1D transport equation.
 
@@ -238,7 +238,7 @@ def assemble_DPN_matrix(element : basix.finite_element.FiniteElement, nodes : np
 
                         #Scattering term (let's do isotropic for now)
                         for m in range(L_scat + 1):
-                            for n in range(N_max + 1):
+                            for n in range(m+1): #range(N_max + 1): but we know that O_t_matrix[mu_sign][m,n] = 0 for n > m 
                                 for s in (-1,1):
                                 # equation number is 
                                     A[total_dof(i, local_i,k , mu_sign), total_dof(i, local_j, n, mu_sign = s)] -= 0.5 * sigma_s[i][m] * (2 * m + 1) * (2* n + 1) * O_t_matrix[mu_sign][m,k] * O_t_matrix[s][m,n] * A_local[local_i, local_j]

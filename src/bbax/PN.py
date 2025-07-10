@@ -61,13 +61,13 @@ def interpolate_PN_solution(x_points, nodes, elem_dofs, solution, lagrange, N_ma
 
 
 
-def Create_PN_Matrix_From_Regions(element : basix.finite_element.FiniteElement, regions : List, elements_per_cm : int, N_max : int, bc : Literal["marshak", "reflective"], energy_group : int):
+def Create_PN_Matrix_From_Regions(element : basix.finite_element.FiniteElement, regions : List, elements_per_cm : int, N_max : int, bc : Literal["marshak", "reflective"], energy_group : int, L_scat : int = None):
     nodes, sigma_t, sigma_s, q = build_elements_and_materials(regions, elements_per_cm, N_max, energy_group, element.dim)
-    return *assemble_PN_matrix(element, nodes, sigma_t, sigma_s, q, N_max, bc), nodes
+    return *assemble_PN_matrix(element, nodes, sigma_t, sigma_s, q, N_max, bc, L_scat), nodes
 
-def assemble_PN_matrix(element : basix.finite_element.FiniteElement, nodes : np.ndarray, sigma_t : Iterable[float], sigma_s : List[np.ndarray], q : List[np.ndarray], N_max : int, bc : Literal["marshak", "reflective"]):
+def assemble_PN_matrix(element : basix.finite_element.FiniteElement, nodes : np.ndarray, sigma_t : Iterable[float], sigma_s : List[np.ndarray], q : List[np.ndarray], N_max : int, bc : Literal["marshak", "reflective"], L_scat : int = None):
     '''
-    Assemble the finite element matrix and right-hand side vector for the 1D transport equation.
+    Assemble the 1-Group PN finite element matrix and right-hand side vector for the 1D transport equation.
 
     Parameters:
     -----------
@@ -75,20 +75,20 @@ def assemble_PN_matrix(element : basix.finite_element.FiniteElement, nodes : np.
         The finite element to use for the assembly.
     nodes: np.ndarray
         Array of node positions in cm.
-    sigma_t: list[np.ndarray(number_of_energy_groups)]
-        List of arrays for total cross section in cm^-1 for each element.
-    sigma_s: list[np.ndarray(max_scatter + 1, number_of_energy_groups, number_of_energy_groups)]
-        List of scattering matrices for each element, where each matrix is of shape (max_scatter + 1, number_of_energy_groups, number_of_energy_groups).
-        This corresponds to k, energy_group_out, energy_group_in. Note that max_scatter will not necessarily be equal to N_max. 
-    q: list[np.ndarray(max_scatter, number_of_energy_groups)]
-        List of source terms for each element, where each array is of shape (max_scatter, number_of_energy_groups).
-        If q[i] is a scalar, it is interpreted as a
-    
-
-
+    sigma_t: np.ndarray(number_of_elements)
+        Arrays for total cross section in cm^-1 for each element.
+    sigma_s: np.ndarray(number_of_elements, N_max + 1)]
+        Ingroup scattering matrices for each element. Assumed it is extended to L_scat, and if L_scat not given, to N_max. Only up until L_scat is used (i.e. L_scat = 1, uses sigma_s[:, 0:2]).
+    q: np.ndarray(number_of_elements, N_max, dof_per_element)]
+        External source terms for each element. Assumed to be extended to N_max + 1
     '''
     if N_max % 2 == 0:
-        raise ValueError("N_max must be odd for this implementation.")
+        raise ValueError("N_max must be odd for this PN implementation.")
+    
+    if L_scat is None:
+        L_scat = N_max
+
+    
     
     n_elem = len(nodes) - 1
 
@@ -142,7 +142,10 @@ def assemble_PN_matrix(element : basix.finite_element.FiniteElement, nodes : np.
             
             no_dofs = len(dof_matrix[i])
             h = nodes[i+1] - nodes[i]           
-            A_local = (sigma_t[i] - sigma_s[i][k]) * mass_matrix * h             
+            if k < L_scat + 1:
+                A_local = (sigma_t[i] - sigma_s[i][k]) * mass_matrix * h             
+            else:
+                A_local = sigma_t[i] * mass_matrix * h
             B_local = local_streaming
             
             s_local = np.einsum("ij,kj -> ik", mass_matrix * h,  q[i])

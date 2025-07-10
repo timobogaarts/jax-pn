@@ -47,7 +47,7 @@ def create_dof_matrix_vertex_interior(element, nodes):
 
 
 
-def build_elements_and_materials(regions, elements_per_cm, N_max, energy_group, dof_elem):
+def build_elements_and_materials(regions, elements_per_cm, L_max, energy_group, dof_elem):
     """
     Build the nodes, centers, and material properties for a 1D mesh based on the given regions.
     Parameters: 
@@ -81,11 +81,11 @@ def build_elements_and_materials(regions, elements_per_cm, N_max, energy_group, 
         nodes.extend(region_nodes)
         sigma_t.extend([st[energy_group]] * n_elem)
 
-        sigma_s_extended_nmax = np.zeros((N_max + 1))
+        sigma_s_extended_nmax = np.zeros((L_max + 1))
         sigma_s_extended_nmax[:ss.shape[0]] = ss[:, energy_group, energy_group]
         
         sigma_s.extend(([sigma_s_extended_nmax]) * n_elem)
-        q_total_matrix =  np.zeros((N_max + 1, dof_elem))
+        q_total_matrix =  np.zeros((L_max + 1, dof_elem))
         q_total_matrix[0,:] = src[energy_group]  # Only zeroth order is non-zero
         q.extend([q_total_matrix] * n_elem)
 
