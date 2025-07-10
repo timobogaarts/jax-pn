@@ -47,51 +47,108 @@ def create_dof_matrix_vertex_interior(element, nodes):
 
 
 
-def build_elements_and_materials(regions, elements_per_cm, L_max, energy_group, dof_elem):
+def interpolate_solution(x_points, nodes, elem_dofs, solution_single_spatial, lagrange):
+    """
+    Interpolate the FEM solution at arbitrary points x_points.
+
+    Parameters:
+    -----------
+    x_points: array(n_points)
+        Points at which to interpolate the solution.
+    nodes: array(n_nodes)
+        Nodes of the FEM mesh.
+    elem_dofs: array(n_elements, p+1)
+        Local DOF indices for each element.
+    solution: array(n_global_dofs)
+        Global solution vector.
+    lagrange: basix.Element
+        Lagrange element used for interpolation.
+
+    Is rather slow: but for 1D, it works okay.
+    
+    Returns: array of interpolated values at x_points
+    """
+    p = lagrange.degree
+    values = np.zeros_like(x_points)
+    
+    # For each point, find which element it is in
+    for i, x in enumerate(x_points):
+        # Find the element containing x
+        e = np.searchsorted(nodes, x) - 1
+        if e < 0: e = 0
+        if e >= len(elem_dofs): e = len(elem_dofs) - 1
+        # Map x to reference coordinate xi in [0, 1]
+        x0, x1 = nodes[e], nodes[e+1]
+        xi = (x - x0) / (x1 - x0)
+        # Tabulate basis at xi
+        phi = lagrange.tabulate(0, np.array([[xi]]))[0, 0, :, 0]  # shape: (p+1,)
+        # Get local DOF values
+        u_local = solution_single_spatial[elem_dofs[e]]
+        # Interpolate
+        values[i] = np.dot(phi, u_local)
+    return values
+
+
+def build_multigroup_elements_and_materials(regions, elements_per_cm, N_max, dof_elem, energy_groups : int = None):
     """
     Build the nodes, centers, and material properties for a 1D mesh based on the given regions.
     Parameters: 
     -----------
     regions: list of tuples (length, sigma_t, sigma_s, source)
         Each tuple defines a region with its length (cm), total cross-section (sigma_t), 
-        scattering cross-section ([sigma_sk] for some maximum k order), and external source term (q) (in cm^-1).
+        scattering cross-section ([sigma_k_gout_gin] for some maximum k order), and external source term (q) (in cm^-1).
     elements_per_cm: int
         Number of finite elements per centimeter.
     Returns:
     --------
     nodes: np.ndarray
-        Array of node positions in cm.
-    centers: np.ndarray
-        Array of element center positions in cm.
+        1D Array of node positions in cm.
+    
     sigma_t: np.ndarray 
-        Array of total cross-section values for each element in cm^-1.
+        Array of total cross-section values for each element in cm^-1:
+
+        shape: (number_of_elements, energy_groups)
+
     sigma_s: np.ndarray
         Array of scattering cross-section values for each element in cm^-1.
+        shape: (number_of_elements, N_max + 1, energy_groups (out), energy_groups (in))
     q: np.ndarray
         Array of source term values for each element in cm^-1.
+        shape: (number_of_elements, N_max + 1, dof_per_element, energy_groups)
     """
-    nodes = [0.0]
-    sigma_t = []
-    sigma_s = []
-    q = []
-    first = True
-    for length, st, ss, src in regions:
-        n_elem = int(round(length * elements_per_cm))
-        region_nodes = np.linspace(nodes[-1], nodes[-1] + length, n_elem + 1)[1:]
-        nodes.extend(region_nodes)
-        sigma_t.extend([st[energy_group]] * n_elem)
 
-        sigma_s_extended_nmax = np.zeros((L_max + 1))
-        sigma_s_extended_nmax[:ss.shape[0]] = ss[:, energy_group, energy_group]
-        
-        sigma_s.extend(([sigma_s_extended_nmax]) * n_elem)
-        q_total_matrix =  np.zeros((L_max + 1, dof_elem))
-        q_total_matrix[0,:] = src[energy_group]  # Only zeroth order is non-zero
-        q.extend([q_total_matrix] * n_elem)
+    n_elem = [int(round(length * elements_per_cm)) for length, _, _, _ in regions]
+    total_elem = sum(n_elem)
 
-    nodes = np.array(nodes)    
-    sigma_t = np.array(sigma_t)    
-    q = np.array(q)        
+    if energy_groups is None:
+        energy_groups = regions[0][1].shape[-1]
+
+        # We could ensure that every regions has the same number of energy groups and l scattering, but we just assume for now.
     
-    return nodes, sigma_t, sigma_s, q
+    if regions[0][2].shape[0] < N_max + 1:
+        L_slice_scat = slice(0, regions[0][2].shape[0])
+    else:
+        L_slice_scat = slice(0, N_max + 1)
+    
+    sigma_t_total = np.zeros((total_elem, energy_groups))
+    sigma_s_total = np.zeros((total_elem, N_max + 1, energy_groups, energy_groups))
+    q_total       = np.zeros((total_elem, N_max + 1, dof_elem, energy_groups))
+    
+    nodes = [0.0]    
+
+
+    
+    
+    for i, (length, sigma_t, sigma_l_gout_gin, src_flat) in enumerate(regions):
+        region_nodes = np.linspace(nodes[-1], nodes[-1] + length, n_elem[i] + 1)[1:]
+        nodes.extend(region_nodes)
+
+        elem_slice = slice(sum(n_elem[:i]), sum(n_elem[:i+1]))
+        
+        sigma_t_total[elem_slice, :]       = sigma_t[np.newaxis, 0:energy_groups]        
+        sigma_s_total[elem_slice, L_slice_scat, :, :] = sigma_l_gout_gin[np.newaxis, L_slice_scat, 0:energy_groups, 0:energy_groups]
+        
+        q_total[elem_slice, 0,:, :] = src_flat[np.newaxis, np.newaxis, 0:energy_groups]  # Only zeroth order is non-zero
+        
+    return np.array(nodes), sigma_t_total, sigma_s_total, q_total
 
