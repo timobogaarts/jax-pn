@@ -3,9 +3,9 @@ from scipy.special import comb
 from numpy.polynomial.legendre import Legendre, leggauss
 import numpy as np
 import matplotlib.pyplot as plt
-import bbax
+import jax_pn
 import basix
-from bbax.FEM1D import create_dof_matrix_vertex_interior, build_multigroup_elements_and_materials
+from jax_pn.FEM1D import create_dof_matrix_vertex_interior, build_multigroup_elements_and_materials
 from typing import Iterable, List, Literal
 from scipy.sparse import lil_matrix
 from scipy.sparse.linalg import spsolve
@@ -232,7 +232,7 @@ def assemble_DPN_matrix(element : basix.finite_element.FiniteElement, nodes : np
                         for m in range(L_scat + 1):
                             for n in range(m+1): #range(N_max + 1): but we know that O_t_matrix[mu_sign][m,n] = 0 for n > m 
                                 for s in (-1,1):
-                                # equation number is 
+                                # equation number is                                     
                                     A[total_dof(i, local_i,k , mu_sign), total_dof(i, local_j, n, mu_sign = s)] -= 0.5 * sigma_s[i][m] * (2 * m + 1) * (2* n + 1) * O_t_matrix[mu_sign][m,k] * O_t_matrix[s][m,n] * A_local[local_i, local_j]                        
 
 

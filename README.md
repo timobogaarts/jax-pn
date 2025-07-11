@@ -1,2 +1,2 @@
-# bbax
-Utility for creating and running 1D simulations of a breeding blanket using autodifferentiable PN methods.
+# jax-pn
+Utility for creating and running 1D neutron multigroup simulations using autodifferentiable PN methods.

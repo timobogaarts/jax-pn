@@ -59,7 +59,7 @@ def interpolate_PN_solution(x_points, nodes, elem_dofs, solution, lagrange, N_ma
 
 
 
-def assemble_PN_matrix(element : basix.finite_element.FiniteElement, nodes : np.ndarray, sigma_t : Iterable[float], sigma_s : List[np.ndarray], q : List[np.ndarray], N_max : int, bc : Literal["marshak", "reflective"], L_scat : int = None):
+def assemble_PN_matrix(element : basix.finite_element.FiniteElement, nodes : np.ndarray, sigma_t : Iterable[float], sigma_s : List[np.ndarray], q : List[np.ndarray], N_max : int, bc : Literal["vacuum", "reflective"], L_scat : int = None):
     '''
     Assemble the 1-Group PN finite element matrix and right-hand side vector for the 1D transport equation.
 
@@ -174,10 +174,10 @@ def assemble_PN_matrix(element : basix.finite_element.FiniteElement, nodes : np.
 
     if bc == "reflective":
         _apply_reflective_bc(A, b, n_global_dofs, L_tot, left_dof = 0,  right_dof = nodes.shape[0] - 1)
-    elif bc == "marshak":    
-        _apply_marshak_bc(    A, b, n_global_dofs, L_tot, left_dof = 0 , right_dof = nodes.shape[0] - 1)                           
+    elif bc == "vacuum":    
+        _apply_vacuum_bc(    A, b, n_global_dofs, L_tot, left_dof = 0 , right_dof = nodes.shape[0] - 1)                           
     else:
-        raise ValueError(f"Unknown boundary condition: {bc}. Supported: 'reflective', 'marshak'.")
+        raise ValueError(f"Unknown boundary condition: {bc}. Supported: 'reflective', 'vacuum'.")
     
     return A, b
 
@@ -283,7 +283,7 @@ def _apply_reflective_bc(A, b, n_global_dofs, L_tot, left_dof, right_dof):
             A[row, row] = 1
             b[row, 0] = 0
 
-def _apply_marshak_bc(A, b, n_global_dofs, L_tot, left_dof, right_dof):
+def _apply_vacuum_bc(A, b, n_global_dofs, L_tot, left_dof, right_dof):
         
         left_coeff_matrix = _legendre_coeff_matrix(L_tot, 0, 1)
         right_coeff_matrix = _legendre_coeff_matrix(L_tot, -1, 0)

@@ -3,7 +3,7 @@ requires = ["hatchling >= 1.26"]
 build-backend = "hatchling.build"
 
 [project]
-name = 'bbax'
+name = 'jax-pn'
 version= '0.0.1'
 description = "Python package utilities for 1D Breeding Blanket Simulations using autodiff PN"
 readme= "README.md"

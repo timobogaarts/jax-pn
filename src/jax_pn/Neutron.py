@@ -38,7 +38,7 @@ class Neutron_Problem:
         self.dofs_per_eg = self.set_dofs_per_eg()
 
     @classmethod
-    def from_regions(cls, regions, elements_per_cm, N_max, element, L_scat):
+    def from_regions_per_cm(cls, regions, elements_per_cm, N_max, element, L_scat):
         """
         Create a DPN_Problem instance from a list of regions.
         
@@ -58,7 +58,33 @@ class Neutron_Problem:
         --------
         DPN_Problem instance
         """        
-        nodes, sigma_t, sigma_s, q = build_multigroup_elements_and_materials(regions, elements_per_cm, N_max, element.dim)
+        nodes, sigma_t, sigma_s, q = build_multigroup_elements_and_materials(regions=regions, N_max = N_max, elements_per_cm=elements_per_cm,\
+                                                                             element = element, elements_per_region= None)
+        return cls(nodes, sigma_t, sigma_s, q, N_max, L_scat, element)
+    
+    @classmethod
+    def from_regions_per_region(cls, regions, elements_per_region, N_max, element, L_scat):
+        """
+        Create a DPN_Problem instance from a list of regions.
+        
+        Parameters:
+        -----------
+        regions: list of tuples (length, sigma_t, sigma_s, source)
+            Each tuple defines a region with its length (cm), total cross-section (sigma_t), 
+            scattering cross-section ([sigma_k_gout_gin] for some maximum k order), and external source term (q) (in cm^-1).
+        elements_per_cm: int
+            Number of finite elements per centimeter.
+        N_max: int
+            Maximum order of the DPN method.
+        element: basix.Element
+            The finite element to use for the assembly.
+        
+        Returns:
+        --------
+        DPN_Problem instance
+        """        
+        nodes, sigma_t, sigma_s, q = build_multigroup_elements_and_materials(regions=regions, N_max = N_max, elements_per_cm=None,\
+                                                                             element = element, elements_per_region= elements_per_region)
         return cls(nodes, sigma_t, sigma_s, q, N_max, L_scat, element)
     
     @abc.abstractmethod
