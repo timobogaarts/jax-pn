@@ -104,6 +104,25 @@ def interpolate_solution(x_points, nodes, elem_dofs, solution_single_spatial, la
     return values
 
 
+
+def compute_local_matrices(element : basix.finite_element.FiniteElement):
+    degree          = element.degree    
+    quad_deg        = 2 * degree    
+    points, weights = basix.make_quadrature(element.cell_type, quad_deg)
+
+    phidphi         = element.tabulate(1, points)
+    phi             = phidphi[0, :, :, 0]  # (n_quadrature_points, n_basis) = value at [quad_point, basis_no]
+    dphi            = phidphi[1, :, :, 0] # (n_quadrature_points, n_basis) = d value / dx at [quad_point, basis_no]
+    
+    hihj            = np.einsum('qi,qj->qij', phi, phi)  # (n_qp, n_basis, n_basis)
+    mass_matrix     = np.tensordot(weights, hihj, axes=([0], [0])) # \int H_i H_j d\xi (no Jacobian)
+
+    dhihj           = np.einsum("qi, qj->qij", phi,  dphi)
+    local_streaming = np.tensordot(weights, dhihj, axes=([0], [0])) # \int  H_i \partial_\xi H_j d\xi (no Jacobian required)
+
+    return mass_matrix, local_streaming
+
+
 def build_multigroup_elements_and_materials(
     regions: List[RegionTuple], 
     N_max: int, 
@@ -195,11 +214,9 @@ def build_multigroup_elements_and_materials(
     if elements_per_region is not None:
         if len(elements_per_region) != len(regions):
             raise ValueError(f"elements_per_region must have the same length as regions but got {len(elements_per_region)} vs {len(regions)}.")
-        n_elem = elements_per_region
-        print(n_elem)
+        n_elem = elements_per_region        
     elif elements_per_cm is not None:
-        n_elem = [int(round(length * elements_per_cm)) for length, _, _, _ in regions]
-        print(n_elem)
+        n_elem = [int(round(length * elements_per_cm)) for length, _, _, _ in regions]        
     else:
         raise ValueError("None of elements_per_cm or elements_per_region are provided.")
     total_elem = sum(n_elem)

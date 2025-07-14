@@ -5,9 +5,8 @@ from scipy import sparse as sps
 from scipy.sparse.linalg import spsolve
 from scipy.sparse import lil_matrix
 import numpy as np
-from functools import lru_cache
-
-
+from functools import lru_cache    
+from .FEM1D import compute_local_matrices
 class Neutron_Problem:
 
     def __init__(self, nodes, sigma_t, sigma_s, q, N_max, L_scat, element : basix.finite_element.FiniteElement):
@@ -36,6 +35,7 @@ class Neutron_Problem:
         self.element = element
         self.dof_matrix, self.n_global_dofs = create_dof_matrix_vertex_interior(self.element, self.nodes)    
         self.dofs_per_eg = self.set_dofs_per_eg()
+        self.mass_matrix, self.local_streaming = compute_local_matrices(self.element)
 
     @classmethod
     def from_regions_per_cm(cls, regions, elements_per_cm, N_max, element, L_scat):

@@ -176,6 +176,8 @@ def assemble_PN_matrix(element : basix.finite_element.FiniteElement, nodes : np.
         _apply_reflective_bc(A, b, n_global_dofs, L_tot, left_dof = 0,  right_dof = nodes.shape[0] - 1)
     elif bc == "vacuum":    
         _apply_vacuum_bc(    A, b, n_global_dofs, L_tot, left_dof = 0 , right_dof = nodes.shape[0] - 1)                           
+    elif bc == "none":
+        pass
     else:
         raise ValueError(f"Unknown boundary condition: {bc}. Supported: 'reflective', 'vacuum'.")
     
@@ -285,8 +287,8 @@ def _apply_reflective_bc(A, b, n_global_dofs, L_tot, left_dof, right_dof):
 
 def _apply_vacuum_bc(A, b, n_global_dofs, L_tot, left_dof, right_dof):
         
-        left_coeff_matrix = _legendre_coeff_matrix(L_tot, 0, 1)
-        right_coeff_matrix = _legendre_coeff_matrix(L_tot, -1, 0)
+        left_coeff_matrix = legendre_coeff_matrix(L_tot, 0, 1)
+        right_coeff_matrix = legendre_coeff_matrix(L_tot, -1, 0)
         for enforce_i in range(1, L_tot, 2):  # boundary condition enforced on odd moments
             enforce_row_left  = left_dof +  enforce_i * n_global_dofs
             enforce_row_right = right_dof + enforce_i * n_global_dofs
@@ -304,7 +306,7 @@ def _apply_vacuum_bc(A, b, n_global_dofs, L_tot, left_dof, right_dof):
                 A[enforce_row_right, right_edge_row] = right_coeff_matrix[enforce_i, l] * (2 * l + 1)
 
 
-def _legendre_coeff_matrix(L_max, a, b):
+def legendre_coeff_matrix(L_max, a, b):
     M = max(2*L_max, 50)  # Number of quadrature points for accuracy
     
     # Gauss-Legendre nodes and weights on [-1,1]
