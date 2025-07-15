@@ -26,16 +26,19 @@ class Neutron_Problem:
         q: np.ndarray(number_of_elements, N_max + 1, dof_per_element, number_of_energy_groups)
             External source terms for each element and energy group. Assumed to be extended to N_max + 1
         """
-        self.nodes = nodes
-        self.sigma_t = sigma_t
-        self.sigma_s = sigma_s
-        self.q = q
-        self.N_max = N_max
-        self.L_scat = L_scat
-        self.element = element
-        self.dof_matrix, self.n_global_dofs = create_dof_matrix_vertex_interior(self.element, self.nodes)    
-        self.dofs_per_eg = self.set_dofs_per_eg()
-        self.mass_matrix, self.local_streaming = compute_local_matrices(self.element)
+        self.nodes                              = nodes
+        self.sigma_t                            = sigma_t
+        self.sigma_s                            = sigma_s
+        self.q                                  = q
+        self.N_max                              = N_max
+        self.L_scat                             = L_scat
+        self.element                            = element
+        self.dof_matrix, self.n_global_dofs     = create_dof_matrix_vertex_interior(self.element, self.nodes)    
+        
+        self.mass_matrix, self.local_streaming  = compute_local_matrices(self.element)
+        self.n_groups                           = self.sigma_s.shape[-1]
+        self.additional_BC_equation             = self.set_additional_BC_equations_per_eg()
+        self.dofs_per_eg                        = self.set_dofs_per_eg() + self.additional_BC_equation
 
     @classmethod
     def from_regions_per_cm(cls, regions, elements_per_cm, N_max, element, L_scat):
@@ -99,8 +102,9 @@ class Neutron_Problem:
     def set_dofs_per_eg(self):
         pass
         
+    def set_additional_BC_equations_per_eg(self):
+        return 0
     
-    @lru_cache(maxsize=128)
     def assemble_multigroup_system(self, bc, n_energy_groups=None):
         """
         Assemble the multigroup DPN finite element matrix and right-hand side vector for the 1D transport equation.
@@ -120,25 +124,55 @@ class Neutron_Problem:
             The right-hand side vector.
         """
         if n_energy_groups is None:
-            n_energy_groups = self.sigma_s.shape[-1]
+            n_energy_groups = self.n_groups
 
-        total_dofs = self.dofs_per_eg * n_energy_groups
+        # this includes dofs for all the boundary conditions!
+        
+        total_dofs = self.dofs_per_eg * n_energy_groups        
 
-        A_total = lil_matrix((total_dofs, total_dofs), dtype=np.float64)
-        b_total = lil_matrix((total_dofs, 1), dtype=np.float64)
+        Arows = []
+        Acols = []
+        Adata = []
+
+        brows = [] 
+        bdata = []
 
         for i in range(n_energy_groups):
-            A, b = self.Assemble_Single_Energy_Group(i, bc)
+
             start_row =       i * self.dofs_per_eg
-            end_row   = (i + 1) * self.dofs_per_eg
+                        
+            # Block-diagonal (single energy group)
+            acoo_data, acoo_row, acoo_col, acoo_shape, bcoo_data, bcoo_row, bcoo_col, bcoo_shape = self.Assemble_Single_Energy_Group(i, bc)            
+            diag_col = start_row
+
+            Arows.append(acoo_row + start_row)
+            Acols.append(acoo_col + diag_col)
+            Adata.append(acoo_data)
             
-            A_total[start_row:end_row, start_row:end_row] = A
-            b_total[start_row:end_row, 0] = b
+            brows.append(bcoo_row + start_row)
+            bdata.append(bcoo_data)
+
+
+            
             for g_in in range(i):
-                A_downscatter = self.Assemble_Downscatter_Matrix(i, g_in)
-                A_total[start_row:end_row, g_in * self.dofs_per_eg:(g_in + 1) * self.dofs_per_eg] -= A_downscatter
+                D_data, D_row, D_col, D_shape = self.Assemble_Downscatter_Matrix(i, g_in)
+                Arows.append(D_row + start_row)
+                Acols.append(D_col + g_in * self.dofs_per_eg)
+                Adata.append(D_data)
+
+
+        rows = np.concatenate(Arows)
+        cols = np.concatenate(Acols)
+        data = np.concatenate(Adata)
+        brow = np.concatenate(brows)
+        bdata = np.concatenate(bdata)
+
+        # Build sparse matrix and vector
+        A_total = sps.coo_matrix((data, (rows, cols)), shape=(total_dofs, total_dofs))
+        b_total = sps.coo_matrix((bdata, (brow, np.zeros_like(brow))), shape=(total_dofs, 1))
 
         return A_total, b_total
+        
     
     def Solve_Multigroup_System(self, bc, n_energy_groups=None):
         """
@@ -157,6 +191,7 @@ class Neutron_Problem:
             The solution vector.
         """
         A, b = self.assemble_multigroup_system(bc, n_energy_groups)
+        print("Solving system with shape:", A.shape, "and", b.shape[0], "equations.")
         self.solution =  spsolve(A.tocsr(), b.tocsr())
         return self.solution
     

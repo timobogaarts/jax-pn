@@ -246,8 +246,11 @@ def assemble_DPN_matrix(element : basix.finite_element.FiniteElement, nodes : np
         apply_DPN_vacuum(A,b, n_global_dofs, L_tot, left_dof = 0, right_dof = nodes.shape[0] - 1)    
     else:
         raise ValueError(f"Unknown boundary condition: {bc}. Supported: 'reflective', 'marshak'.")
-    
-    return A, b
+
+    acoo = A.tocoo()
+    bcoo = b.tocoo()
+
+    return acoo.data, acoo.row, acoo.col, acoo.shape, bcoo.data, bcoo.row, bcoo.col, bcoo.shape
 
 
 def Assemble_Downscatter_DPN_Matrix(element : basix.finite_element.FiniteElement, nodes : np.ndarray, sigma_s : np.ndarray, N_max : int, L_scat : int = None):
@@ -350,9 +353,10 @@ def Assemble_Downscatter_DPN_Matrix(element : basix.finite_element.FiniteElement
                         for m in range(L_scat + 1):
                             for n in range(m+1): #range(N_max + 1): but we know that O_t_matrix[mu_sign][m,n] = 0 for n > m 
                                 for s in (-1,1):                                
-                                    A[total_dof(i, local_i,k , mu_sign), total_dof(i, local_j, n, mu_sign = s)] += 0.5 * sigma_s[i][m] * (2 * m + 1) * (2* n + 1) * O_t_matrix[mu_sign][m,k] * O_t_matrix[s][m,n] * A_local[local_i, local_j]            
+                                    A[total_dof(i, local_i,k , mu_sign), total_dof(i, local_j, n, mu_sign = s)] -= 0.5 * sigma_s[i][m] * (2 * m + 1) * (2* n + 1) * O_t_matrix[mu_sign][m,k] * O_t_matrix[s][m,n] * A_local[local_i, local_j]            
     
-    return A
+    acoo = A.tocoo()
+    return acoo.data, acoo.row, acoo.col, acoo.shape
 
 
 class DPN_Problem(Neutron_Problem):

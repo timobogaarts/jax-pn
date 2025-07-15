@@ -59,7 +59,7 @@ def interpolate_PN_solution(x_points, nodes, elem_dofs, solution, lagrange, N_ma
 
 
 
-def assemble_PN_matrix(element : basix.finite_element.FiniteElement, nodes : np.ndarray, sigma_t : Iterable[float], sigma_s : List[np.ndarray], q : List[np.ndarray], N_max : int, bc : Literal["vacuum", "reflective"], L_scat : int = None):
+def assemble_PN_matrix(element : basix.finite_element.FiniteElement, nodes : np.ndarray, sigma_t : Iterable[float], sigma_s : List[np.ndarray], q : List[np.ndarray], N_max : int, bc = Literal["vacuum", "reflective", "none"], L_scat : int = None):
     '''
     Assemble the 1-Group PN finite element matrix and right-hand side vector for the 1D transport equation.
 
@@ -180,8 +180,11 @@ def assemble_PN_matrix(element : basix.finite_element.FiniteElement, nodes : np.
         pass
     else:
         raise ValueError(f"Unknown boundary condition: {bc}. Supported: 'reflective', 'vacuum'.")
+
+    acoo = A.tocoo()
+    bcoo = b.tocoo()
     
-    return A, b
+    return acoo.data, acoo.row, acoo.col, acoo.shape, bcoo.data, bcoo.row, bcoo.col, bcoo.shape
 
 
 def Assemble_Downscatter_PN_Matrix(element : basix.finite_element.FiniteElement, nodes : np.ndarray, sigma_s : np.ndarray, N_max : int, L_scat : int = None):
@@ -265,9 +268,10 @@ def Assemble_Downscatter_PN_Matrix(element : basix.finite_element.FiniteElement,
                     # Scatter term
                     if k < L_scat + 1:
                         #print(k, L_scat)
-                        ADSS[total_dof(i, local_i, k), total_dof(i, local_j, k)] += A_local[local_i, local_j] * sigma_s[i][k]
+                        ADSS[total_dof(i, local_i, k), total_dof(i, local_j, k)] -= A_local[local_i, local_j] * sigma_s[i][k]
 
-    return ADSS
+    coo_mat = ADSS.tocoo()
+    return coo_mat.data, coo_mat.row, coo_mat.col, coo_mat.shape
 
 
 
@@ -329,7 +333,7 @@ def legendre_coeff_matrix(L_max, a, b):
 
 
 class PN_Problem(Neutron_Problem):
-    def Assemble_Single_Energy_Group(self, energy_group, bc : Literal["vacuum"]):
+    def Assemble_Single_Energy_Group(self, energy_group : int, bc : Literal["vacuum", "reflective", "none"]):
         """
         Assemble the DPN finite element matrix and right-hand side vector for a single energy group.
         
@@ -347,7 +351,7 @@ class PN_Problem(Neutron_Problem):
         b: scipy.sparse.lil_matrix
             The right-hand side vector.
         """
-        return assemble_PN_matrix(self.element, self.nodes, self.sigma_t[:, energy_group], self.sigma_s[:, :, energy_group, energy_group], self.q[:, :, :, energy_group], self.N_max, bc, self.L_scat)
+        return assemble_PN_matrix(self.element, self.nodes, self.sigma_t[:, energy_group], self.sigma_s[:, :, energy_group, energy_group], self.q[:, :, :, energy_group], self.N_max, bc, self.L_scat)        
     
     def set_dofs_per_eg(self):
         """
