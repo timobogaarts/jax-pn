@@ -28,64 +28,6 @@ def add_block_if(cond, block_fn, fallback_shape):
         operand=None
     )
 
-def global_index_PN(    
-    n_moments: int,
-    n_global_dofs: int,
-    group: Union[int, jnp.ndarray],
-    moment: Union[int, jnp.ndarray],
-    dof_index: Union[int, jnp.ndarray]
-) -> jnp.ndarray:
-    """
-    Compute the global index for a given group, moment, and dof index.
-    The first three parameters are scalar constants.
-    The last three parameters can be scalars or JAX arrays (vectorized).
-
-    Parameters
-    ----------
-    n_groups : int
-        Total number of energy groups (scalar constant)
-    n_moments : int
-        Total number of angular moments (scalar constant)
-    n_global_dofs : int
-        Total number of global degrees of freedom per moment (spatial discretisation) (scalar constant)
-    group : int or jax.numpy.ndarray
-        Energy group index(es) - can be vectorized
-    moment : int or jax.numpy.ndarray
-        Angular moment index(es) - can be vectorized
-    dof_index : int or jax.numpy.ndarray
-        Degree of freedom index(es) - can be vectorized (global: not local, should already have been indexed by the element -> global dof matrix)
-
-    Returns
-    -------
-    jax.numpy.ndarray
-        Global index(es)
-    """
-    return group * (n_moments) * n_global_dofs + moment * n_global_dofs + dof_index
-
-class NSettings:
-    '''
-    Class to aggregate settings for the AD-PN solver.
-    Ensures all variables are jax compatible.
-    '''
-    def __init__(self, n_groups, n_moments, n_global_dofs, n_elements,
-                 elem_dof_matrix, n_local_dofs, mass_matrix,
-                 local_streaming, nodes):
-        self.n_groups        = n_groups
-        self.n_moments       = n_moments
-        self.n_global_dofs   = n_global_dofs
-        self.n_elements      = n_elements
-        self.n_local_dofs    = n_local_dofs
-
-        self.elem_dof_matrix = jnp.array(elem_dof_matrix)
-        self.mass_matrix     = jnp.array(mass_matrix)
-        self.local_streaming = jnp.array(local_streaming)
-        self.nodes           = jnp.array(nodes)
-
-        self.h_i = self.nodes[1:] - self.nodes[:-1]
-
-
-
-
 def local_matrix_PN_single_g(
         moment_k : int,
         elem_i :int,
@@ -233,6 +175,46 @@ def _append_marshak_boundary_conditions(n_moments : int, n_global_dofs, left_dof
     return jnp.array(Vcc_rows), jnp.array(Vcc_cols), jnp.array(Vcc_vals) , jnp.array(bcc_rows), jnp.array(bcc_vals)
 
 
+def _append_reflective_boundary_conditions(n_moments : int, n_global_dofs, left_dof, right_dof, leg_coeff_left, leg_coeff_right):
+    bc_offset =n_global_dofs * n_moments 
+    
+    Vcc_rows = []
+    Vcc_cols = []
+    Vcc_vals = []
+    bcc_rows = []
+    bcc_vals = []
+
+    i_bc = 0 
+    
+    for enforce_i in range(1, n_moments, 2): # number of boundary conditions = group * len(range(1, settings.n_moments, 2))            
+        
+        index_left_dof_group = enforce_i * n_global_dofs + left_dof
+        index_right_dof_group = enforce_i * n_global_dofs + right_dof
+
+        Vcc_rows.append(bc_offset + i_bc + 0)
+        Vcc_cols.append(index_left_dof_group)
+        Vcc_vals.append(1.0)
+
+        Vcc_rows.append(bc_offset + i_bc + 1)
+        Vcc_cols.append(index_right_dof_group)
+        Vcc_vals.append(1.0)
+
+        Vcc_rows.append(index_left_dof_group)
+        Vcc_cols.append(bc_offset + i_bc + 0)
+        Vcc_vals.append(1.0)                
+
+        Vcc_rows.append(index_right_dof_group)
+        Vcc_cols.append(bc_offset + i_bc + 1)
+        Vcc_vals.append(1.0)
+        
+        bcc_rows.append(bc_offset + i_bc + 0)
+        bcc_vals.append(0.0)
+        bcc_rows.append(bc_offset + i_bc + 1)
+        bcc_vals.append(0.0)
+        i_bc += 2    
+    return jnp.array(Vcc_rows), jnp.array(Vcc_cols), jnp.array(Vcc_vals) , jnp.array(bcc_rows), jnp.array(bcc_vals)
+
+
 
 
 def total_matrix_assembly_vacuum_bcs_single_g(
@@ -271,11 +253,49 @@ def total_matrix_assembly_vacuum_bcs_single_g(
         return vals_np, rows_np, cols_np, vals_b_np, rows_b_np#
 
 
+
+def total_matrix_assembly_reflective_bcs_single_g(
+        moments : jnp.ndarray,
+        elems : jnp.ndarray,
+        n_local_dofs : int, 
+        n_moments    : int, 
+        n_global_dofs: int,
+        elem_dof_matrix : jnp.ndarray,        
+        local_streaming : jnp.ndarray,
+        mass_matrix     : jnp.ndarray,                
+        sigma_t_i : jnp.ndarray,
+        sigma_s_k_i_gg : jnp.ndarray,
+        h_i : jnp.ndarray, 
+        q_i_k_j : jnp.ndarray,
+        left_dof : int,
+        right_dof : int,
+        leg_coeff_left : jnp.ndarray,
+        leg_coeff_right : jnp.ndarray
+        ):
+                
+        total_entries = len(elems) * n_local_dofs * n_local_dofs * 3 * n_moments # this is the number of non-zero entries in the matrix: *not* the shape of the sparse matrix
+        total_bcs     = 2 *  n_moments * n_moments  # this is the number of non-zero entries in the boundary condition matrix: *not* the shape of the sparse boundary condition matrix        
+        
+        rows_all, cols_all, vals_all, rows_b, vals_b      = vmap_local_matrix_PN_single_g(moments, elems, n_local_dofs, n_moments, n_global_dofs, elem_dof_matrix, local_streaming, mass_matrix, sigma_t_i, sigma_s_k_i_gg, h_i, q_i_k_j)                                                
+        Vcc_rows, Vcc_cols, Vcc_vals , bcc_rows, bcc_vals = reflective_jit(n_moments, n_global_dofs, left_dof = left_dof, right_dof = right_dof, leg_coeff_left = leg_coeff_left, leg_coeff_right = leg_coeff_right)                            
+
+        vals_np = jnp.concatenate([vals_all.ravel(), Vcc_vals])        
+        rows_np = jnp.concatenate([rows_all.ravel(), Vcc_rows])    
+        cols_np = jnp.concatenate([cols_all.ravel(), Vcc_cols])        
+
+        vals_b_np = jnp.concatenate([vals_b.ravel(), bcc_vals])
+        rows_b_np = jnp.concatenate([rows_b.ravel(), bcc_rows])
+        
+        return vals_np, rows_np, cols_np, vals_b_np, rows_b_np#
+
+
 ## Jitted versions
-marshak_jit                                    = jax.jit(_append_marshak_boundary_conditions, static_argnums=(0)) # static argnum is number of moments, which is required for JAX to compile the loops.
-local_matrix_PN_single_g_jit                   = jax.jit(local_matrix_PN_single_g, static_argnums= (2,3))     # static argnums are n_local_dofs and n_moments, which are required for JAX to compile the loops and allocate arrays
-vmap_local_matrix_PN_single_g                  = jax.jit(jax.vmap(jax.vmap(local_matrix_PN_single_g_jit, in_axes=(0, None, None, None, None, None, None, None, None, None, None, None)), in_axes=(None, 0, None, None, None, None, None, None, None, None, None, None)), static_argnums=(2,3)) # static argnums are n_local_dofs and n_moments, which are required for JAX to compile the loops and allocate arrays
-total_matrix_assembly_vacuum_bcs_single_g_jit  = jax.jit(total_matrix_assembly_vacuum_bcs_single_g, static_argnums=(2, 3)) # static argnums are n_local_dofs and n_moments, which are required for JAX to compile the loops and allocate arrays
+marshak_jit                                        = jax.jit(_append_marshak_boundary_conditions, static_argnums=(0)) # static argnum is number of moments, which is required for JAX to compile the loops.
+reflective_jit                                     = jax.jit(_append_reflective_boundary_conditions, static_argnums=(0)) # static argnum is number of moments, which is required for JAX to compile the loops.
+local_matrix_PN_single_g_jit                       = jax.jit(local_matrix_PN_single_g, static_argnums= (2,3))     # static argnums are n_local_dofs and n_moments, which are required for JAX to compile the loops and allocate arrays
+vmap_local_matrix_PN_single_g                      = jax.jit(jax.vmap(jax.vmap(local_matrix_PN_single_g_jit, in_axes=(0, None, None, None, None, None, None, None, None, None, None, None)), in_axes=(None, 0, None, None, None, None, None, None, None, None, None, None)), static_argnums=(2,3)) # static argnums are n_local_dofs and n_moments, which are required for JAX to compile the loops and allocate arrays
+total_matrix_assembly_vacuum_bcs_single_g_jit      = jax.jit(total_matrix_assembly_vacuum_bcs_single_g, static_argnums=(2, 3)) # static argnums are n_local_dofs and n_moments, which are required for JAX to compile the loops and allocate arrays
+total_matrix_assembly_reflective_bcs_single_g_jit  = jax.jit(total_matrix_assembly_reflective_bcs_single_g, static_argnums=(2, 3)) # static argnums are n_local_dofs and n_moments, which are required for JAX to compile the loops and allocate arrays
 
 
 local_matrix_PN_scatter_jit  = jax.jit(local_matrix_PN_scatter, static_argnums=(2)) # static argnums are n_local_dofs and n_moments, which are required for JAX to compile the loops and allocate arrays
@@ -284,19 +304,7 @@ vmap_local_matrix_PN_scatter = jax.jit(jax.vmap(jax.vmap(local_matrix_PN_scatter
 
 class ADPN_Problem(PN_Problem):
     def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        # Create and assign nsettings attribute
-        self.nsettings = NSettings(
-            n_groups=self.sigma_s.shape[-1],
-            n_moments=self.N_max + 1,
-            n_global_dofs=self.n_global_dofs,
-            n_elements=len(self.nodes) - 1,
-            elem_dof_matrix=self.dof_matrix,
-            n_local_dofs=self.dof_matrix.shape[1],
-            mass_matrix=self.mass_matrix,
-            local_streaming=self.local_streaming,
-            nodes=self.nodes
-        )
+        super().__init__(*args, **kwargs)        
         
         # Making sure all arrays are JAX compatible for the matrix assembly
 
@@ -309,16 +317,16 @@ class ADPN_Problem(PN_Problem):
         self.jax_mass_matrix = jnp.array(self.mass_matrix)
         self.jax_local_streaming = jnp.array(self.local_streaming)
         self.jax_nodes = jnp.array(self.nodes)
-        self.jax_elems = jnp.arange(self.nsettings.n_elements)
-        self.jax_moments = jnp.arange(self.nsettings.n_moments)
+        self.jax_elems = jnp.arange(self.jax_n_elements)
+        self.jax_moments = jnp.arange(self.jax_n_moments)
 
         self.jax_sigma_t = jnp.array(self.sigma_t)
         self.jax_sigma_s = jnp.array(self.sigma_s)
-        self.jax_h_i = jnp.array(self.nsettings.h_i)
+        self.jax_h_i = jnp.array(self.nodes[1:] - self.nodes[:-1])
         self.jax_q_i_k_j = jnp.array(self.q)
 
-        self.jax_left_coeff_matrix  = jnp.array(legendre_coeff_matrix(self.nsettings.n_moments,  0, 1))
-        self.jax_right_coeff_matrix = jnp.array(legendre_coeff_matrix(self.nsettings.n_moments, -1, 0))
+        self.jax_left_coeff_matrix  = jnp.array(legendre_coeff_matrix(self.jax_n_moments,  0, 1))
+        self.jax_right_coeff_matrix = jnp.array(legendre_coeff_matrix(self.jax_n_moments, -1, 0))
     
 
 
@@ -351,6 +359,16 @@ class ADPN_Problem(PN_Problem):
                     leg_coeff_left=self.jax_left_coeff_matrix,
                     leg_coeff_right=self.jax_right_coeff_matrix
                 )      
+        elif bc == "reflective":
+            vals_np, rows_np, cols_np, vals_b_np, rows_b_np = total_matrix_assembly_reflective_bcs_single_g_jit(
+                    self.jax_moments, self.jax_elems, self.jax_n_local_dofs, self.jax_n_moments, self.jax_n_global_dofs,
+                    self.jax_elem_dof_matrix, self.jax_local_streaming, self.jax_mass_matrix,
+                    self.jax_sigma_t[:, energy_group], self.jax_sigma_s[:, :, energy_group, energy_group],
+                    self.jax_h_i, self.jax_q_i_k_j[:, :, :, energy_group],
+                    left_dof=0, right_dof=len(self.jax_nodes) - 1,
+                    leg_coeff_left=self.jax_left_coeff_matrix,
+                    leg_coeff_right=self.jax_right_coeff_matrix
+                )
         else:
             raise ValueError(f"Unsupported boundary condition: {bc}. Only 'vacuum' is currently implemented.")
         

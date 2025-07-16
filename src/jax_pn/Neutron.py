@@ -192,7 +192,7 @@ class Neutron_Problem:
         """
         A, b = self.assemble_multigroup_system(bc, n_energy_groups)
         print("Solving system with shape:", A.shape, "and", b.shape[0], "equations.")
-        self.solution =  spsolve(A.tocsr(), b.tocsr())
+        self.solution =  spsolve(A.tocsr().astype(np.float64), b.tocsr().astype(np.float64))
         return self.solution
     
     @abc.abstractmethod

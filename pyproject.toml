@@ -11,6 +11,7 @@ authors = [{name = "Timo Bogaarts", email = "t.j.bogaarts@tue.nl"}]
 dependencies = [
           "numpy",          
           "h5py",          
-          "scipy"          
+          "scipy",
+          "basix"          
         ]
 requires-python = ">3.7"
