@@ -5,7 +5,7 @@ import numpy as np
 import basix
 from scipy.sparse import lil_matrix
 import scipy.sparse
-from typing import List, Iterable, Literal, Union
+from typing import List, Iterable, Literal, Union, Dict
 from numpy.polynomial.legendre import legval
 from scipy.special import legendre
 from numpy.polynomial.legendre import leggauss
@@ -13,7 +13,7 @@ from .FEM1D import create_dof_matrix_vertex_interior
 from .PN import legendre_coeff_matrix, PN_Problem
 from .Neutron import Neutron_Problem, interpolate_solution
 from functools import cached_property
-
+from dataclasses import dataclass
 
 
 def add_block_if(cond, block_fn, fallback_shape):
@@ -28,21 +28,37 @@ def add_block_if(cond, block_fn, fallback_shape):
         operand=None
     )
 
+@dataclass(frozen=True)
+class GlobalSettings:
+    n_local_dofs: int
+    n_moments: int
+    n_global_dofs: int
+    n_elements: int
+    left_dof: int
+    right_dof: int
+
 def local_matrix_PN_single_g(
         moment_k : int,
-        elem_i :int,
-        n_local_dofs : int, 
-        n_moments    : int, 
-        n_global_dofs: int,
-        elem_dof_matrix : jnp.ndarray,        
-        local_streaming : jnp.ndarray,
-        mass_matrix     : jnp.ndarray,                
-        sigma_t_i : jnp.ndarray,
-        sigma_s_k_i_gg : jnp.ndarray,
-        h_i : jnp.ndarray, 
-        q_i_k_j : jnp.ndarray):  
+        elem_i   : int, 
+        global_settings : GlobalSettings, 
+        matrix_settings : Dict,
+        parameters : Dict):  
     
-    
+    n_local_dofs    = global_settings.n_local_dofs
+    n_moments       = global_settings.n_moments
+    n_global_dofs   = global_settings.n_global_dofs
+
+    elem_dof_matrix = matrix_settings['elem_dof_matrix']
+    local_streaming = matrix_settings['local_streaming']
+    mass_matrix     = matrix_settings['mass_matrix']
+    #leg_coeff_left  = matrix_settings['leg_coeff_left']
+    #leg_coeff_right = matrix_settings['leg_coeff_right']
+
+    sigma_t_i       = parameters['sigma_t_i']
+    sigma_s_k_i_gg  = parameters['sigma_s_k_i_gg']
+    h_i             = parameters['h_i']
+    q_i_k_j         = parameters['q_i_k_j']
+
     img, jmg = jnp.meshgrid(jnp.arange(n_local_dofs), jnp.arange(n_local_dofs), indexing='ij')
 
     # i is row, j is column (row = equation number, column = dof number)
@@ -96,17 +112,27 @@ def local_matrix_PN_single_g(
 
 def local_matrix_PN_scatter(moment_k : int,
         elem_i :int,
-        n_local_dofs : int,          
-        n_global_dofs: int,
-        elem_dof_matrix : jnp.ndarray,                
-        mass_matrix     : jnp.ndarray,                        
-        sigma_s_k_i_gg : jnp.ndarray,
-        h_i : jnp.ndarray
-    ):
+        global_settings : GlobalSettings, 
+        matrix_settings : Dict,
+        parameters : Dict):        
     '''
     Assembles the local matrix for a single element for the scattering term. This does 
     take into account the dof numbering in the single group, but the global group numbering has to be added separately. (i.e. row += g_out * dofs_per_eg, col = gin * dofs_per_eg )    
     '''
+    n_local_dofs    = global_settings.n_local_dofs
+    #n_moments       = global_settings['n_moments']
+    n_global_dofs   = global_settings.n_global_dofs
+
+    elem_dof_matrix = matrix_settings['elem_dof_matrix']
+    #local_streaming = matrix_settings['local_streaming']
+    mass_matrix     = matrix_settings['mass_matrix']
+    #leg_coeff_left  = matrix_settings['leg_coeff_left']
+    #leg_coeff_right = matrix_settings['leg_coeff_right']
+
+    #sigma_t_i       = parameters['sigma_t_i']
+    sigma_s_k_i_gg  = parameters['sigma_s_k_i_gg']
+    h_i             = parameters['h_i']
+    #q_i_k_j         = parameters['q_i_k_j']
 
     img, jmg = jnp.meshgrid(jnp.arange(n_local_dofs), jnp.arange(n_local_dofs), indexing='ij')
 
@@ -135,7 +161,27 @@ def local_matrix_PN_scatter(moment_k : int,
     return add_mass_block()
 
 
-def _append_marshak_boundary_conditions(n_moments : int, n_global_dofs, left_dof, right_dof, leg_coeff_left, leg_coeff_right):
+def _append_marshak_boundary_conditions(global_settings : GlobalSettings, 
+        matrix_settings : Dict):
+    
+    #n_local_dofs    = global_settings['n_local_dofs']
+    n_moments       = global_settings.n_moments
+    n_global_dofs   = global_settings.n_global_dofs
+    left_dof        = global_settings.left_dof
+    right_dof       = global_settings.right_dof
+
+    #elem_dof_matrix = matrix_settings['elem_dof_matrix']
+    #local_streaming = matrix_settings['local_streaming']
+    #mass_matrix     = matrix_settings['mass_matrix']
+    leg_coeff_left  = matrix_settings['leg_coeff_left']
+    leg_coeff_right = matrix_settings['leg_coeff_right']
+    
+
+    #sigma_t_i       = parameters['sigma_t_i']
+    #sigma_s_k_i_gg  = parameters['sigma_s_k_i_gg']
+    #h_i             = parameters['h_i']
+    #q_i_k_j         = parameters['q_i_k_j']
+
     bc_offset =n_global_dofs * n_moments 
     
     Vcc_rows = []
@@ -175,7 +221,25 @@ def _append_marshak_boundary_conditions(n_moments : int, n_global_dofs, left_dof
     return jnp.array(Vcc_rows), jnp.array(Vcc_cols), jnp.array(Vcc_vals) , jnp.array(bcc_rows), jnp.array(bcc_vals)
 
 
-def _append_reflective_boundary_conditions(n_moments : int, n_global_dofs, left_dof, right_dof, leg_coeff_left, leg_coeff_right):
+def _append_reflective_boundary_conditions(global_settings : Dict):
+    
+    #n_local_dofs    = global_settings['n_local_dofs']
+    n_moments       = global_settings.n_moments
+    n_global_dofs   = global_settings.n_global_dofs
+    left_dof        = global_settings.left_dof
+    right_dof       = global_settings.right_dof
+
+    #elem_dof_matrix = matrix_settings['elem_dof_matrix']
+    #local_streaming = matrix_settings['local_streaming']
+    #mass_matrix     = matrix_settings['mass_matrix']
+    #leg_coeff_left  = matrix_settings['leg_coeff_left']
+    #leg_coeff_right = matrix_settings['leg_coeff_right']    
+
+    #sigma_t_i       = parameters['sigma_t_i']
+    #sigma_s_k_i_gg  = parameters['sigma_s_k_i_gg']
+    #h_i             = parameters['h_i']
+    #q_i_k_j         = parameters['q_i_k_j']
+
     bc_offset =n_global_dofs * n_moments 
     
     Vcc_rows = []
@@ -217,31 +281,20 @@ def _append_reflective_boundary_conditions(n_moments : int, n_global_dofs, left_
 
 
 
-def total_matrix_assembly_vacuum_bcs_single_g(
-        moments : jnp.ndarray,
-        elems : jnp.ndarray,
-        n_local_dofs : int, 
-        n_moments    : int, 
-        n_global_dofs: int,
-        elem_dof_matrix : jnp.ndarray,        
-        local_streaming : jnp.ndarray,
-        mass_matrix     : jnp.ndarray,                
-        sigma_t_i : jnp.ndarray,
-        sigma_s_k_i_gg : jnp.ndarray,
-        h_i : jnp.ndarray, 
-        q_i_k_j : jnp.ndarray,
-        left_dof : int,
-        right_dof : int,
-        leg_coeff_left : jnp.ndarray,
-        leg_coeff_right : jnp.ndarray
+def total_matrix_assembly_vacuum_bcs_single_g(        
+        global_settings : Dict,
+        matrix_settings : Dict,
+        parameters : Dict        
         ):
                 
-        total_entries = len(elems) * n_local_dofs * n_local_dofs * 3 * n_moments # this is the number of non-zero entries in the matrix: *not* the shape of the sparse matrix
-        total_bcs     = 2 *  n_moments * n_moments  # this is the number of non-zero entries in the boundary condition matrix: *not* the shape of the sparse boundary condition matrix        
+        moments = jnp.arange(global_settings.n_moments)
+        elems   = jnp.arange(global_settings.n_elements)
+        #total_entries = len(elems) * n_local_dofs * n_local_dofs * 3 * n_moments # this is the number of non-zero entries in the matrix: *not* the shape of the sparse matrix
+        #total_bcs     = 2 *  n_moments * n_moments  # this is the number of non-zero entries in the boundary condition matrix: *not* the shape of the sparse boundary condition matrix        
         
-        rows_all, cols_all, vals_all, rows_b, vals_b      = vmap_local_matrix_PN_single_g(moments, elems, n_local_dofs, n_moments, n_global_dofs, elem_dof_matrix, local_streaming, mass_matrix, sigma_t_i, sigma_s_k_i_gg, h_i, q_i_k_j)                                                
+        rows_all, cols_all, vals_all, rows_b, vals_b      = vmap_local_matrix_PN_single_g(moments, elems, global_settings, matrix_settings, parameters)                                                
 
-        Vcc_rows, Vcc_cols, Vcc_vals , bcc_rows, bcc_vals = marshak_jit(n_moments, n_global_dofs, left_dof = left_dof, right_dof = right_dof, leg_coeff_left = leg_coeff_left, leg_coeff_right = leg_coeff_right)                            
+        Vcc_rows, Vcc_cols, Vcc_vals , bcc_rows, bcc_vals = marshak_jit(global_settings, matrix_settings)                            
 
         vals_np = jnp.concatenate([vals_all.ravel(), Vcc_vals])        
         rows_np = jnp.concatenate([rows_all.ravel(), Vcc_rows])    
@@ -255,29 +308,19 @@ def total_matrix_assembly_vacuum_bcs_single_g(
 
 
 def total_matrix_assembly_reflective_bcs_single_g(
-        moments : jnp.ndarray,
-        elems : jnp.ndarray,
-        n_local_dofs : int, 
-        n_moments    : int, 
-        n_global_dofs: int,
-        elem_dof_matrix : jnp.ndarray,        
-        local_streaming : jnp.ndarray,
-        mass_matrix     : jnp.ndarray,                
-        sigma_t_i : jnp.ndarray,
-        sigma_s_k_i_gg : jnp.ndarray,
-        h_i : jnp.ndarray, 
-        q_i_k_j : jnp.ndarray,
-        left_dof : int,
-        right_dof : int,
-        leg_coeff_left : jnp.ndarray,
-        leg_coeff_right : jnp.ndarray
+        global_settings : Dict,
+        matrix_settings : Dict,
+        parameters : Dict        
         ):
                 
-        total_entries = len(elems) * n_local_dofs * n_local_dofs * 3 * n_moments # this is the number of non-zero entries in the matrix: *not* the shape of the sparse matrix
-        total_bcs     = 2 *  n_moments * n_moments  # this is the number of non-zero entries in the boundary condition matrix: *not* the shape of the sparse boundary condition matrix        
+        moments = jnp.arange(global_settings.n_moments)
+        elems   = jnp.arange(global_settings.n_elements)
+        #total_entries = len(elems) * n_local_dofs * n_local_dofs * 3 * n_moments # this is the number of non-zero entries in the matrix: *not* the shape of the sparse matrix
+        #total_bcs     = 2 *  n_moments * n_moments  # this is the number of non-zero entries in the boundary condition matrix: *not* the shape of the sparse boundary condition matrix        
         
-        rows_all, cols_all, vals_all, rows_b, vals_b      = vmap_local_matrix_PN_single_g(moments, elems, n_local_dofs, n_moments, n_global_dofs, elem_dof_matrix, local_streaming, mass_matrix, sigma_t_i, sigma_s_k_i_gg, h_i, q_i_k_j)                                                
-        Vcc_rows, Vcc_cols, Vcc_vals , bcc_rows, bcc_vals = reflective_jit(n_moments, n_global_dofs, left_dof = left_dof, right_dof = right_dof, leg_coeff_left = leg_coeff_left, leg_coeff_right = leg_coeff_right)                            
+        rows_all, cols_all, vals_all, rows_b, vals_b      = vmap_local_matrix_PN_single_g(moments, elems, global_settings, matrix_settings, parameters)                                                
+
+        Vcc_rows, Vcc_cols, Vcc_vals , bcc_rows, bcc_vals = reflective_jit(global_settings, matrix_settings)                            
 
         vals_np = jnp.concatenate([vals_all.ravel(), Vcc_vals])        
         rows_np = jnp.concatenate([rows_all.ravel(), Vcc_rows])    
@@ -289,17 +332,29 @@ def total_matrix_assembly_reflective_bcs_single_g(
         return vals_np, rows_np, cols_np, vals_b_np, rows_b_np#
 
 
+def total_downscatter_matrix_assembly(
+        global_settings : GlobalSettings,
+        matrix_settings : Dict,
+        parameters : Dict):
+        moments = jnp.arange(global_settings.n_moments)
+        elems   = jnp.arange(global_settings.n_elements)
+
+        rows_all, cols_all, vals_all = vmap_local_matrix_PN_scatter(moments, elems, global_settings, matrix_settings, parameters) # this is a vmap over the elements and moments, so it returns a 3D array of shape (n_elements, n_local_dofs, n_local_dofs)
+        return vals_all.flatten(), rows_all.flatten(), cols_all.flatten()
+
+
 ## Jitted versions
 marshak_jit                                        = jax.jit(_append_marshak_boundary_conditions, static_argnums=(0)) # static argnum is number of moments, which is required for JAX to compile the loops.
 reflective_jit                                     = jax.jit(_append_reflective_boundary_conditions, static_argnums=(0)) # static argnum is number of moments, which is required for JAX to compile the loops.
-local_matrix_PN_single_g_jit                       = jax.jit(local_matrix_PN_single_g, static_argnums= (2,3))     # static argnums are n_local_dofs and n_moments, which are required for JAX to compile the loops and allocate arrays
-vmap_local_matrix_PN_single_g                      = jax.jit(jax.vmap(jax.vmap(local_matrix_PN_single_g_jit, in_axes=(0, None, None, None, None, None, None, None, None, None, None, None)), in_axes=(None, 0, None, None, None, None, None, None, None, None, None, None)), static_argnums=(2,3)) # static argnums are n_local_dofs and n_moments, which are required for JAX to compile the loops and allocate arrays
-total_matrix_assembly_vacuum_bcs_single_g_jit      = jax.jit(total_matrix_assembly_vacuum_bcs_single_g, static_argnums=(2, 3)) # static argnums are n_local_dofs and n_moments, which are required for JAX to compile the loops and allocate arrays
-total_matrix_assembly_reflective_bcs_single_g_jit  = jax.jit(total_matrix_assembly_reflective_bcs_single_g, static_argnums=(2, 3)) # static argnums are n_local_dofs and n_moments, which are required for JAX to compile the loops and allocate arrays
+local_matrix_PN_single_g_jit                       = jax.jit(local_matrix_PN_single_g, static_argnums= (2))     # static argnums are n_local_dofs and n_moments, which are required for JAX to compile the loops and allocate arrays
+vmap_local_matrix_PN_single_g                      = jax.jit(jax.vmap(jax.vmap(local_matrix_PN_single_g_jit, in_axes=(0, None, None, None, None)), in_axes=(None, 0, None, None, None)), static_argnums=(2)) # static argnums are n_local_dofs and n_moments, which are required for JAX to compile the loops and allocate arrays
+total_matrix_assembly_vacuum_bcs_single_g_jit      = jax.jit(total_matrix_assembly_vacuum_bcs_single_g, static_argnums=(0)) # static argnums are n_local_dofs and n_moments, which are required for JAX to compile the loops and allocate arrays
+total_matrix_assembly_reflective_bcs_single_g_jit  = jax.jit(total_matrix_assembly_reflective_bcs_single_g, static_argnums=(0)) # static argnums are n_local_dofs and n_moments, which are required for JAX to compile the loops and allocate arrays
+total_downscatter_matrix_assembly_jit              = jax.jit(total_downscatter_matrix_assembly, static_argnums=(0)) # static argnums are n_local_dofs and n_moments, which are required for JAX to compile the loops and allocate arrays
 
 
 local_matrix_PN_scatter_jit  = jax.jit(local_matrix_PN_scatter, static_argnums=(2)) # static argnums are n_local_dofs and n_moments, which are required for JAX to compile the loops and allocate arrays
-vmap_local_matrix_PN_scatter = jax.jit(jax.vmap(jax.vmap(local_matrix_PN_scatter_jit, in_axes=(0, None, None, None, None, None, None, None)), in_axes=(None, 0, None, None, None, None, None, None)), static_argnums=(2)) # static argnums are n_local_dofs
+vmap_local_matrix_PN_scatter = jax.jit(jax.vmap(jax.vmap(local_matrix_PN_scatter_jit, in_axes=(0, None, None, None, None)), in_axes=(None, 0, None, None, None)), static_argnums=(2)) # static argnums are n_local_dofs and n_moments, which are required for JAX to compile the loops and allocate arrays
 
 
 class ADPN_Problem(PN_Problem):
@@ -327,6 +382,28 @@ class ADPN_Problem(PN_Problem):
 
         self.jax_left_coeff_matrix  = jnp.array(legendre_coeff_matrix(self.jax_n_moments,  0, 1))
         self.jax_right_coeff_matrix = jnp.array(legendre_coeff_matrix(self.jax_n_moments, -1, 0))
+
+        self.global_settings = GlobalSettings(**{'n_local_dofs'    : self.jax_n_local_dofs,
+            'n_moments'       : self.jax_n_moments,
+            'n_global_dofs'   : self.jax_n_global_dofs,
+            'n_elements'      : self.jax_n_elements,
+            'left_dof'        : 0,
+            'right_dof'       : len(self.jax_nodes) - 1            
+        })
+        self.matrix_settings = {
+            'elem_dof_matrix' : self.jax_elem_dof_matrix,
+            'local_streaming' : self.jax_local_streaming,
+            'mass_matrix'     : self.jax_mass_matrix,
+            'leg_coeff_left'  : self.jax_left_coeff_matrix,
+            'leg_coeff_right' : self.jax_right_coeff_matrix
+        }
+
+        self.parameters = {
+            'sigma_t_i'       : self.jax_sigma_t,
+            'sigma_s_k_i_gg'  : self.jax_sigma_s,
+            'h_i'             : self.jax_h_i,
+            'q_i_k_j'         : self.jax_q_i_k_j
+        }
     
 
 
@@ -349,31 +426,30 @@ class ADPN_Problem(PN_Problem):
         b: jax.experimental.sparse.BCOO
             The right-hand side vector.
         """                     
+
+        parameters_eg = {
+            'sigma_t_i'       : self.jax_sigma_t[:, energy_group],
+            'sigma_s_k_i_gg'  : self.jax_sigma_s[:, :, energy_group, energy_group],
+            'h_i'             : self.jax_h_i,
+            'q_i_k_j'         : self.jax_q_i_k_j[:, :, :, energy_group]
+        }
         if bc == "vacuum":     
-            vals_np, rows_np, cols_np, vals_b_np, rows_b_np = total_matrix_assembly_vacuum_bcs_single_g_jit(
-                    self.jax_moments, self.jax_elems, self.jax_n_local_dofs, self.jax_n_moments, self.jax_n_global_dofs,
-                    self.jax_elem_dof_matrix, self.jax_local_streaming, self.jax_mass_matrix,
-                    self.jax_sigma_t[:, energy_group], self.jax_sigma_s[:, :, energy_group, energy_group],
-                    self.jax_h_i, self.jax_q_i_k_j[:, :, :, energy_group],
-                    left_dof=0, right_dof=len(self.jax_nodes) - 1,
-                    leg_coeff_left=self.jax_left_coeff_matrix,
-                    leg_coeff_right=self.jax_right_coeff_matrix
-                )      
+            vals_np, rows_np, cols_np, vals_b_np, rows_b_np = total_matrix_assembly_vacuum_bcs_single_g_jit(self.global_settings, self.matrix_settings, parameters_eg)
+                      
         elif bc == "reflective":
-            vals_np, rows_np, cols_np, vals_b_np, rows_b_np = total_matrix_assembly_reflective_bcs_single_g_jit(
-                    self.jax_moments, self.jax_elems, self.jax_n_local_dofs, self.jax_n_moments, self.jax_n_global_dofs,
-                    self.jax_elem_dof_matrix, self.jax_local_streaming, self.jax_mass_matrix,
-                    self.jax_sigma_t[:, energy_group], self.jax_sigma_s[:, :, energy_group, energy_group],
-                    self.jax_h_i, self.jax_q_i_k_j[:, :, :, energy_group],
-                    left_dof=0, right_dof=len(self.jax_nodes) - 1,
-                    leg_coeff_left=self.jax_left_coeff_matrix,
-                    leg_coeff_right=self.jax_right_coeff_matrix
-                )
+            vals_np, rows_np, cols_np, vals_b_np, rows_b_np = total_matrix_assembly_reflective_bcs_single_g_jit(self.global_settings, self.matrix_settings, parameters_eg)
         else:
             raise ValueError(f"Unsupported boundary condition: {bc}. Only 'vacuum' is currently implemented.")
         
         return vals_np, rows_np, cols_np, (self.dofs_per_eg, self.dofs_per_eg), vals_b_np, rows_b_np, np.zeros_like(rows_b_np), (self.dofs_per_eg, 1) 
         
     def Assemble_Downscatter_Matrix(self, energy_group_out, energy_group_in):
-        rows, cols, vals = vmap_local_matrix_PN_scatter(self.jax_moments, self.jax_elems, self.jax_n_local_dofs, self.jax_n_global_dofs, self.jax_elem_dof_matrix, self.jax_mass_matrix, self.jax_sigma_s[:, :, energy_group_out, energy_group_in], self.jax_h_i)
-        return vals.flatten(), rows.flatten(), cols.flatten(), (self.dofs_per_eg, self.dofs_per_eg)
+        parameters_eg = {
+            'sigma_t_i'       : self.jax_sigma_t[:, energy_group_out], # not actually used
+            'sigma_s_k_i_gg'  : self.jax_sigma_s[:, :, energy_group_out, energy_group_in],
+            'h_i'             : self.jax_h_i,                           
+            'q_i_k_j'         : self.jax_q_i_k_j[:, :, :, energy_group_out] # not actually used
+        }
+
+        vals, rows, cols =  total_downscatter_matrix_assembly_jit(self.global_settings, self.matrix_settings, parameters_eg)
+        return vals, rows, cols, (self.dofs_per_eg, self.dofs_per_eg)
