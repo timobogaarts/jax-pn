@@ -16,26 +16,27 @@ from functools import cached_property
 from dataclasses import dataclass
 
 
-def add_block_if(cond, block_fn, fallback_shape):
+def add_block_if(cond, block_fn, fallback_shape, dtypefloat, dtypeint):
     """Helper to conditionally add a block to the matrix.
        Else falls back to adding zeros at the (0,0) position"""
     return jax.lax.cond(
         cond,
         lambda _: block_fn(),
-        lambda _: (jnp.zeros(fallback_shape, dtype=jnp.int32),   # rows
-                   jnp.zeros(fallback_shape, dtype=jnp.int32),   # cols
-                   jnp.zeros(fallback_shape, dtype=jnp.float32)),# vals
+        lambda _: (jnp.zeros(fallback_shape, dtype=dtypeint),   # rows
+                   jnp.zeros(fallback_shape, dtype=dtypeint),   # cols
+                   jnp.zeros(fallback_shape, dtype=dtypefloat)),# vals
         operand=None
     )
 
 @dataclass(frozen=True)
 class GlobalSettings:
-    n_local_dofs: int
+    n_local_dofs: int # dof per element
     n_moments: int
-    n_global_dofs: int
+    n_global_dofs: int # total dofs in the problem per moment
     n_elements: int
     left_dof: int
     right_dof: int
+    n_dofs_per_eg : int # includes additional boundary conditions
 
 def local_matrix_PN_single_g(
         moment_k : int,
@@ -93,9 +94,9 @@ def local_matrix_PN_single_g(
         return assemble_block(moment_k, moment_k, local_block)
 
 
-    rows_km1, cols_km1, vals_km1 = add_block_if(moment_k > 0, add_km1_block, fallback_shape=(total_matrix_entries_local,))
+    rows_km1, cols_km1, vals_km1 = add_block_if(moment_k > 0, add_km1_block, fallback_shape=(total_matrix_entries_local,), dtypeint = img.dtype, dtypefloat=h_i.dtype)
 
-    rows_kp1, cols_kp1, vals_kp1 = add_block_if(moment_k < n_moments - 1, add_kp1_block, fallback_shape=(total_matrix_entries_local,))
+    rows_kp1, cols_kp1, vals_kp1 = add_block_if(moment_k < n_moments - 1, add_kp1_block, fallback_shape=(total_matrix_entries_local,), dtypeint = img.dtype, dtypefloat=h_i.dtype)
 
     rows_mass, cols_mass, vals_mass = add_mass_block()
 
@@ -197,6 +198,7 @@ def _append_marshak_boundary_conditions(global_settings : GlobalSettings,
             index_left_dof_group = l * n_global_dofs + left_dof
             index_right_dof_group = l * n_global_dofs + right_dof
 
+            # VCC contribution
             Vcc_rows.append(bc_offset + i_bc + 0)
             Vcc_cols.append(index_left_dof_group)
             Vcc_vals.append(leg_coeff_left[enforce_i, l] * (2 * l + 1))
@@ -205,6 +207,7 @@ def _append_marshak_boundary_conditions(global_settings : GlobalSettings,
             Vcc_cols.append(index_right_dof_group)
             Vcc_vals.append(leg_coeff_right[enforce_i, l] * (2 * l + 1))
 
+            # VCC^T contribution
             Vcc_rows.append(index_left_dof_group)
             Vcc_cols.append(bc_offset + i_bc + 0)
             Vcc_vals.append(leg_coeff_left[enforce_i, l] * (2 * l + 1))                
@@ -356,6 +359,147 @@ total_downscatter_matrix_assembly_jit              = jax.jit(total_downscatter_m
 local_matrix_PN_scatter_jit  = jax.jit(local_matrix_PN_scatter, static_argnums=(2)) # static argnums are n_local_dofs and n_moments, which are required for JAX to compile the loops and allocate arrays
 vmap_local_matrix_PN_scatter = jax.jit(jax.vmap(jax.vmap(local_matrix_PN_scatter_jit, in_axes=(0, None, None, None, None)), in_axes=(None, 0, None, None, None)), static_argnums=(2)) # static argnums are n_local_dofs and n_moments, which are required for JAX to compile the loops and allocate arrays
 
+# =========================================
+# Residual 
+# =========================================
+from jax_pn.ADPN import GlobalSettings, Dict
+def local_residual(
+        moment_k : int,
+        elem_i   : int, 
+        global_settings : GlobalSettings, 
+        matrix_settings : Dict,
+        parameters : Dict,
+        solution   : jnp.ndarray):  
+    
+    n_local_dofs    = global_settings.n_local_dofs
+    n_moments       = global_settings.n_moments
+    n_global_dofs   = global_settings.n_global_dofs
+    left_dof        = global_settings.left_dof
+    right_dof       = global_settings.right_dof
+
+    elem_dof_matrix = matrix_settings['elem_dof_matrix']
+    local_streaming = matrix_settings['local_streaming']
+    mass_matrix     = matrix_settings['mass_matrix']
+
+    # For BC:
+    leg_coeff_left  = matrix_settings['leg_coeff_left']
+    leg_coeff_right = matrix_settings['leg_coeff_right']
+
+    sigma_t_i       = parameters['sigma_t_i']
+    sigma_s_k_i_gg  = parameters['sigma_s_k_i_gg']
+    h_i             = parameters['h_i']
+    q_i_k_j         = parameters['q_i_k_j']
+
+    j = jnp.arange(n_local_dofs)
+    spatial_global_i = elem_dof_matrix[elem_i, j]     
+    
+    def global_index(k_value, i):
+        return  k_value * n_global_dofs + i
+
+    indices_ik = global_index(moment_k, spatial_global_i)
+    
+    def add_zero(residual):
+        return residual
+    
+    def add_minus_one(residual):
+        indices_i_km1 = global_index(moment_k - 1, spatial_global_i)
+        solution_km1 = solution[indices_i_km1]
+        residual_km1 = moment_k / (2 * moment_k + 1) * (local_streaming @ solution_km1)
+        residual = residual.at[:].add(residual_km1)
+        return residual
+    
+    def add_plus_one(residual):
+        indices_i_kp1 = global_index(moment_k + 1, spatial_global_i)
+        solution_kp1 = solution[indices_i_kp1]
+        residual_kp1 = (moment_k + 1) / (2 * moment_k + 1) * (local_streaming @ solution_kp1)
+        residual = residual.at[:].add(residual_kp1)
+        return residual
+
+    def left_dof_bc_vacuum(residual):
+        enforce_is = jnp.arange(1,n_moments,2) # number of left boundary conditions
+        lagrange_multipliers = solution[n_global_dofs * n_moments: n_global_dofs * n_moments + len(enforce_is) * 2 : 2] # this is the lagrange multipliers for the left boundary conditions                                
+        # left dof is first node of first element, so we add it at location 0 (MAGIC)    
+        return residual.at[0].add( jnp.sum(leg_coeff_left[enforce_is, moment_k] * (2 * moment_k + 1) * lagrange_multipliers))
+    
+    def right_dof_bc_vacuum(residual):
+        enforce_is = jnp.arange(1,n_moments,2) # number of left boundary conditions
+        lagrange_multipliers = solution[n_global_dofs * n_moments + 1: n_global_dofs * n_moments + len(enforce_is) * 2 : 2] # this is the lagrange multipliers for the left boundary conditions                
+        # right dof is second node of last element, so we add it at location 1  (MAGIC)    
+        return residual.at[1].add( jnp.sum(leg_coeff_right[enforce_is, moment_k] * (2 * moment_k + 1) * lagrange_multipliers))
+
+    residual = (mass_matrix @ solution[indices_ik]) * (sigma_t_i[elem_i] - sigma_s_k_i_gg[elem_i, moment_k]) * h_i[elem_i]
+
+    residual = jax.lax.cond(moment_k > 0,              add_minus_one, add_zero, residual) # if moment_k > 0, add the k - 1 block, else do nothing
+    residual = jax.lax.cond(moment_k < n_moments - 1,  add_plus_one, add_zero,  residual) # if moment_k > 0, add the k - 1 block, else do nothing    
+
+    residual = jax.lax.cond( (elem_i == 0) ,                              left_dof_bc_vacuum, add_zero, residual)  # if elem_i == 0, apply left BC
+    residual = jax.lax.cond( (elem_i == global_settings.n_elements - 1), right_dof_bc_vacuum, add_zero, residual)  # if elem_i == n_elements - apply right BC
+
+    b_values_j = (mass_matrix * h_i[elem_i]) @ q_i_k_j[elem_i, moment_k, :]
+
+    return residual - b_values_j
+
+def residual_bc_marshak(global_settings : GlobalSettings, matrix_settings : Dict, solution : jnp.ndarray):
+    
+    enforced_l = jnp.arange(1, global_settings.n_moments, 2) # number of left boundary conditions
+    residual   = jnp.zeros(global_settings.n_moments)
+
+    total_spatial_dofs = global_settings.n_global_dofs * global_settings.n_moments
+    
+    all_l = jnp.arange(global_settings.n_moments)
+
+    solution_left_all_l  = solution[global_settings.left_dof  : total_spatial_dofs : global_settings.n_global_dofs]
+    solution_right_all_l = solution[global_settings.right_dof : total_spatial_dofs : global_settings.n_global_dofs]
+
+    residual = residual.at[::2].add( jnp.sum(matrix_settings['leg_coeff_left'][enforced_l, :]   * (2 * all_l[None, :] + 1) * solution_left_all_l[None,:] , axis=1))
+    residual = residual.at[1::2].add( jnp.sum(matrix_settings['leg_coeff_right'][enforced_l, :] * (2 * all_l[None, :] + 1) * solution_right_all_l[None,:] , axis=1))
+    
+    return residual
+
+local_residual_jit = jax.jit(local_residual, static_argnums = (2))
+
+vmap_local_residual_PN_single_g = jax.jit(jax.vmap(jax.vmap(local_residual_jit, in_axes=(0, None, None, None, None, None)), in_axes=(None, 0, None, None, None, None)), static_argnums=(2)) # static argnums are n_local_dofs and n_moments, which are required for JAX to compile the loops and allocate arrays
+
+residual_bc_marshak_jit = jax.jit(residual_bc_marshak, static_argnums=(0,)) # static argnum is global_settings, which is required for JAX to compile the loops and allocate arrays
+
+def residualPN(global_settings : GlobalSettings, matrix_settings, parameters_eg, solution):
+      # shape: (n_elems, n_moments, n_local_dofs)
+    moments = jnp.arange(global_settings.n_moments)
+    elems   = jnp.arange(global_settings.n_elements)
+    # Compute global indices for all (elem, moment, dof)
+    n_moments = global_settings.n_moments    
+    n_global_dofs =global_settings.n_global_dofs
+
+    local_residuals = vmap_local_residual_PN_single_g(
+        moments,
+        elems,
+        global_settings,
+        matrix_settings,
+        parameters_eg,
+        solution
+    )
+
+    # Shape: (n_elems, n_local_dofs)
+    elem_dof_matrix = matrix_settings["elem_dof_matrix"]
+    
+    # Broadcast and compute indices for all moments
+    moment_offsets = jnp.arange(n_moments) * n_global_dofs  # (n_moments,)
+    
+    # Shape: (n_moments, n_elems, n_local_dofs)
+    global_indices = elem_dof_matrix[None, :, :] + moment_offsets[:, None, None]
+
+    # Flatten everything
+    flat_indices = global_indices.ravel()
+    flat_a = local_residuals.transpose(1,0,2).ravel()  # (n_moments, n_elems, n_local_dofs) -> (n_moments*n_elems*n_local_dofs,)
+
+    # Scatter-add into global residual
+    global_residual = jnp.zeros_like(solution)
+    global_residual = global_residual.at[flat_indices].add(flat_a)
+    global_residual = global_residual.at[n_global_dofs * n_moments:].add(residual_bc_marshak_jit(global_settings, matrix_settings, solution)) # add the boundary condition residuals
+
+    return global_residual
+
+residualPN_jit = jax.jit(residualPN, static_argnums=(0))
 
 class ADPN_Problem(PN_Problem):
     def __init__(self, *args, **kwargs):
@@ -388,7 +532,8 @@ class ADPN_Problem(PN_Problem):
             'n_global_dofs'   : self.jax_n_global_dofs,
             'n_elements'      : self.jax_n_elements,
             'left_dof'        : 0,
-            'right_dof'       : len(self.jax_nodes) - 1            
+            'right_dof'       : len(self.jax_nodes) - 1,            
+            'n_dofs_per_eg'   : self.dofs_per_eg
         })
         self.matrix_settings = {
             'elem_dof_matrix' : self.jax_elem_dof_matrix,
