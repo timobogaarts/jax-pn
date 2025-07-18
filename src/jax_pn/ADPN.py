@@ -412,8 +412,7 @@ def local_residual_eg(
         term = -(mass_matrix @ solution[indices_i_k]) * sigma_s_k_i_gg[elem_i, moment_k, energy_group_g, g] * h_i[elem_i]
         return acc + term
     
-    residual = jax.lax.fori_loop(0, energy_group_g, scatter_contribution, residual)    
-
+    residual   = jax.lax.fori_loop(0, energy_group_g, scatter_contribution, residual)    
     b_values_j = (mass_matrix * h_i[elem_i]) @ q_i_k_j[elem_i, moment_k, :, energy_group_g]
 
     return residual - b_values_j
