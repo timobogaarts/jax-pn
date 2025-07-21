@@ -28,6 +28,16 @@ class GlobalSettings:
     n_dofs_per_eg : int   # includes additional boundary conditions
     n_energy_groups : int # number of energy groups in the problem
 
+@jax.tree_util.register_dataclass
+@dataclass(frozen=True)
+class MatrixSettings:
+    elem_dof_matrix : jnp.ndarray # local dof matrix for each element, shape (n_elements, n_local_dofs)
+    local_streaming : jnp.ndarray # local streaming matrix, shape (n_local_dofs, n_local_dofs)
+    mass_matrix     : jnp.ndarray # local mass matrix, shape (n_local_dofs, n_local_dofs)
+    leg_coeff_left  : jnp.ndarray # Legendre coefficients for the left boundary condition, shape (n_moments, n_moments)
+    leg_coeff_right : jnp.ndarray # Legendre coefficients for the right boundary condition, shape (n_moments, n_moments)
+
+#@jax.tree_util.register_pytree_node_class
 
 # =============================================================================================================================================================================================
 # |                                                                                Matrix Assembly Functions                                                                                  |
@@ -58,9 +68,9 @@ def local_matrix_PN_single_g(
     n_moments       = global_settings.n_moments
     n_global_dofs   = global_settings.n_global_dofs
 
-    elem_dof_matrix = matrix_settings['elem_dof_matrix']
-    local_streaming = matrix_settings['local_streaming']
-    mass_matrix     = matrix_settings['mass_matrix']    
+    elem_dof_matrix = matrix_settings.elem_dof_matrix
+    local_streaming = matrix_settings.local_streaming
+    mass_matrix     = matrix_settings.mass_matrix    
 
     sigma_t_i       = parameters['sigma_t_i']
     sigma_s_k_i_gg  = parameters['sigma_s_k_i_gg']
@@ -130,8 +140,8 @@ def local_matrix_PN_scatter(moment_k : int,
     n_local_dofs    = global_settings.n_local_dofs    
     n_global_dofs   = global_settings.n_global_dofs
 
-    elem_dof_matrix = matrix_settings['elem_dof_matrix']
-    mass_matrix     = matrix_settings['mass_matrix']
+    elem_dof_matrix = matrix_settings.elem_dof_matrix
+    mass_matrix     = matrix_settings.mass_matrix
     
     sigma_s_k_i_gg  = parameters['sigma_s_k_i_gg']
     h_i             = parameters['h_i']
@@ -169,8 +179,8 @@ def _append_marshak_boundary_conditions(global_settings : GlobalSettings, matrix
     left_dof        = global_settings.left_dof
     right_dof       = global_settings.right_dof
 
-    leg_coeff_left  = matrix_settings['leg_coeff_left']
-    leg_coeff_right = matrix_settings['leg_coeff_right']    
+    leg_coeff_left  = matrix_settings.leg_coeff_left
+    leg_coeff_right = matrix_settings.leg_coeff_right    
 
     bc_offset =n_global_dofs * n_moments 
     
@@ -345,12 +355,12 @@ def local_residual_eg(
 
     n_dofs_per_eg   = global_settings.n_dofs_per_eg     
 
-    elem_dof_matrix = matrix_settings['elem_dof_matrix']
-    local_streaming = matrix_settings['local_streaming']
-    mass_matrix     = matrix_settings['mass_matrix']
+    elem_dof_matrix = matrix_settings.elem_dof_matrix
+    local_streaming = matrix_settings.local_streaming
+    mass_matrix     = matrix_settings.mass_matrix
 
-    leg_coeff_left  = matrix_settings['leg_coeff_left']
-    leg_coeff_right = matrix_settings['leg_coeff_right']
+    leg_coeff_left  = matrix_settings.leg_coeff_left
+    leg_coeff_right = matrix_settings.leg_coeff_right
 
     sigma_t_i       = parameters['sigma_t_i']
     sigma_s_k_i_gg  = parameters['sigma_s_k_i_gg']
@@ -435,8 +445,8 @@ def residual_bc_marshak_eg(energy_group_g : int, global_settings : GlobalSetting
     solution_left_all_l  = solution[solution_left_indices]
     solution_right_all_l = solution[solution_right_indices]
 
-    residual = residual.at[::2].add( jnp.sum(matrix_settings['leg_coeff_left'][enforced_l, :]   * (2 * all_l[None, :] + 1) * solution_left_all_l[None,:] , axis=1))
-    residual = residual.at[1::2].add( jnp.sum(matrix_settings['leg_coeff_right'][enforced_l, :] * (2 * all_l[None, :] + 1) * solution_right_all_l[None,:] , axis=1))
+    residual = residual.at[::2].add( jnp.sum(matrix_settings.leg_coeff_left[enforced_l, :]   * (2 * all_l[None, :] + 1) * solution_left_all_l[None,:] , axis=1))
+    residual = residual.at[1::2].add( jnp.sum(matrix_settings.leg_coeff_right[enforced_l, :] * (2 * all_l[None, :] + 1) * solution_right_all_l[None,:] , axis=1))
     
     return residual
 
@@ -471,7 +481,7 @@ def residualPN(global_settings : GlobalSettings, matrix_settings, parameters_eg,
         for k in range(n_moments):            
             offset_k = offset_g + global_settings.n_global_dofs * k
 
-            global_dof_indices = matrix_settings["elem_dof_matrix"] + offset_k
+            global_dof_indices = matrix_settings.elem_dof_matrix + offset_k
             global_residual    = global_residual.at[global_dof_indices].add(local_residuals[:, k, g, :])
         
         bcs = residual_bc_marshak_eg_jit(
@@ -492,7 +502,6 @@ class ADPN_Problem(PN_Problem):
         super().__init__(*args, **kwargs)        
         
         # Making sure all arrays are JAX compatible for the matrix assembly
-
         self.jax_n_groups = self.sigma_s.shape[-1]        
         self.jax_n_moments = self.N_max + 1
         self.jax_n_global_dofs = self.n_global_dofs
@@ -522,13 +531,13 @@ class ADPN_Problem(PN_Problem):
             'n_dofs_per_eg'   : self.dofs_per_eg,
             "n_energy_groups" : self.jax_n_groups
         })
-        self.matrix_settings = {
+        self.matrix_settings = MatrixSettings(**{
             'elem_dof_matrix' : self.jax_elem_dof_matrix,
             'local_streaming' : self.jax_local_streaming,
             'mass_matrix'     : self.jax_mass_matrix,
             'leg_coeff_left'  : self.jax_left_coeff_matrix,
             'leg_coeff_right' : self.jax_right_coeff_matrix
-        }
+        })
 
         self.parameters = {
             'sigma_t_i'       : self.jax_sigma_t,
@@ -536,8 +545,8 @@ class ADPN_Problem(PN_Problem):
             'h_i'             : self.jax_h_i,
             'q_i_k_j'         : self.jax_q_i_k_j
         }
-    
 
+                    
 
     def set_additional_BC_equations_per_eg(self):
         return self.N_max + 1
@@ -585,3 +594,28 @@ class ADPN_Problem(PN_Problem):
 
         vals, rows, cols =  total_downscatter_matrix_assembly_jit(self.global_settings, self.matrix_settings, parameters_eg)
         return vals, rows, cols, (self.dofs_per_eg, self.dofs_per_eg)
+
+    def assemble_multigroup_system(self, bc, n_energy_groups=None, parameters_eg = None):
+
+        backup_params = {
+            'sigma_t_i'       : jnp.copy(self.jax_sigma_t),
+            'sigma_s_k_i_gg'  : jnp.copy(self.jax_sigma_s),
+            'h_i'             : jnp.copy(self.jax_h_i),
+            'q_i_k_j'         : jnp.copy(self.jax_q_i_k_j)
+        }
+
+        if parameters_eg is not None:
+            self.jax_sigma_t = parameters_eg['sigma_t_i']
+            self.jax_sigma_s = parameters_eg['sigma_s_k_i_gg']
+            self.jax_h_i     = parameters_eg['h_i']
+            self.jax_q_i_k_j = parameters_eg['q_i_k_j']
+        
+
+
+        result = super().assemble_multigroup_system(bc, n_energy_groups)
+
+        self.jax_sigma_t = backup_params['sigma_t_i']
+        self.jax_sigma_s = backup_params['sigma_s_k_i_gg']
+        self.jax_h_i     = backup_params['h_i']     
+        self.jax_q_i_k_j = backup_params['q_i_k_j']
+        return result
