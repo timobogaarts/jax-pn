@@ -407,7 +407,8 @@ def local_residual_eg(
         return residual.at[1].add( jnp.sum(leg_coeff_right[enforce_is, moment_k] * (2 * moment_k + 1) * lagrange_multipliers))
     
     indices_ik = global_index(energy_group_g,moment_k, spatial_global_i)    
-    residual = (mass_matrix @ solution[indices_ik]) * (sigma_t_i[elem_i, energy_group_g] - sigma_s_k_i_gg[elem_i, moment_k, energy_group_g, energy_group_g]) * h_i[elem_i]
+    #residual = (mass_matrix @ solution[indices_ik]) * (sigma_t_i[elem_i, energy_group_g] - sigma_s_k_i_gg[elem_i, moment_k, energy_group_g, energy_group_g]) * h_i[elem_i]
+    residual = (mass_matrix @ solution[indices_ik]) * (sigma_t_i[elem_i, energy_group_g]) * h_i[elem_i]
 
     residual = jax.lax.cond(moment_k > 0,              add_minus_one, add_zero, residual) # if moment_k > 0,     add the k - 1 block, else do nothing
     residual = jax.lax.cond(moment_k < n_moments - 1,  add_plus_one, add_zero,  residual) # if moment_k < N_max, add the k + 1 block, else do nothing    
@@ -422,7 +423,8 @@ def local_residual_eg(
         term = -(mass_matrix @ solution[indices_i_k]) * sigma_s_k_i_gg[elem_i, moment_k, energy_group_g, g] * h_i[elem_i]
         return acc + term
     
-    residual   = jax.lax.fori_loop(0, energy_group_g, scatter_contribution, residual)    
+    # upscatter included to have a static fori loop
+    residual   = jax.lax.fori_loop(0, global_settings.n_energy_groups, scatter_contribution, residual)    
     b_values_j = (mass_matrix * h_i[elem_i]) @ q_i_k_j[elem_i, moment_k, :, energy_group_g]
 
     return residual - b_values_j
@@ -502,22 +504,22 @@ class ADPN_Problem(PN_Problem):
         super().__init__(*args, **kwargs)        
         
         # Making sure all arrays are JAX compatible for the matrix assembly
-        self.jax_n_groups = self.sigma_s.shape[-1]        
-        self.jax_n_moments = self.N_max + 1
-        self.jax_n_global_dofs = self.n_global_dofs
-        self.jax_n_elements = len(self.nodes) - 1
-        self.jax_n_local_dofs = self.dof_matrix.shape[1]
-        self.jax_elem_dof_matrix = jnp.array(self.dof_matrix)
-        self.jax_mass_matrix = jnp.array(self.mass_matrix)
-        self.jax_local_streaming = jnp.array(self.local_streaming)
-        self.jax_nodes = jnp.array(self.nodes)
-        self.jax_elems = jnp.arange(self.jax_n_elements)
-        self.jax_moments = jnp.arange(self.jax_n_moments)
+        self.jax_n_groups         = self.sigma_s.shape[-1]
+        self.jax_n_moments        = self.N_max + 1
+        self.jax_n_global_dofs    = self.n_global_dofs
+        self.jax_n_elements       = len(self.nodes) - 1
+        self.jax_n_local_dofs     = self.dof_matrix.shape[1]
+        self.jax_elem_dof_matrix  = jnp.array(self.dof_matrix)
+        self.jax_mass_matrix      = jnp.array(self.mass_matrix)
+        self.jax_local_streaming  = jnp.array(self.local_streaming)
+        self.jax_nodes            = jnp.array(self.nodes)
+        self.jax_elems            = jnp.arange(self.jax_n_elements)
+        self.jax_moments          = jnp.arange(self.jax_n_moments)
 
-        self.jax_sigma_t = jnp.array(self.sigma_t)
-        self.jax_sigma_s = jnp.array(self.sigma_s)
-        self.jax_h_i = jnp.array(self.nodes[1:] - self.nodes[:-1])
-        self.jax_q_i_k_j = jnp.array(self.q)
+        self.jax_sigma_t          = jnp.array(self.sigma_t)
+        self.jax_sigma_s          = jnp.array(self.sigma_s)
+        self.jax_h_i              = jnp.array(self.nodes[1:] - self.nodes[:-1])
+        self.jax_q_i_k_j          = jnp.array(self.q)
 
         self.jax_left_coeff_matrix  = jnp.array(legendre_coeff_matrix(self.jax_n_moments,  0, 1))
         self.jax_right_coeff_matrix = jnp.array(legendre_coeff_matrix(self.jax_n_moments, -1, 0))
