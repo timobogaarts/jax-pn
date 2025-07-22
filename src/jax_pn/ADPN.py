@@ -4,7 +4,8 @@ import jax.numpy as jnp
 import numpy as np
 import basix
 from scipy.sparse import lil_matrix
-import scipy.sparse
+import scipy.sparse 
+
 from typing import List, Iterable, Literal, Union, Dict
 from numpy.polynomial.legendre import legval
 from scipy.special import legendre
@@ -335,6 +336,65 @@ total_downscatter_matrix_assembly_jit              = jax.jit(total_downscatter_m
 
 local_matrix_PN_scatter_jit  = jax.jit(local_matrix_PN_scatter, static_argnums=(2)) # static argnums are n_local_dofs and n_moments, which are required for JAX to compile the loops and allocate arrays
 vmap_local_matrix_PN_scatter = jax.jit(jax.vmap(jax.vmap(local_matrix_PN_scatter_jit, in_axes=(0, None, None, None, None)), in_axes=(None, 0, None, None, None)), static_argnums=(2)) # static argnums are n_local_dofs and n_moments, which are required for JAX to compile the loops and allocate arrays
+
+
+
+def assemble_multigroup_system(global_settings : GlobalSettings,matrix_settings : MatrixSettings, parameters : Dict):     # same as Neutron_Problem.assemble_multigroup_system, but without global state.
+    
+    total_dofs = global_settings.n_dofs_per_eg * global_settings.n_energy_groups        
+
+    Arows = []
+    Acols = []
+    Adata = []
+
+    brows = [] 
+    bdata = []
+
+    for i in range(global_settings.n_energy_groups):
+
+        start_row =       i * global_settings.n_dofs_per_eg
+                    
+        # Block-diagonal (single energy group)
+        parameters_eg =  {
+            'sigma_t_i'       : parameters['sigma_t_i'][:, i],
+            'sigma_s_k_i_gg'  : parameters['sigma_s_k_i_gg'][:, :, i, i],
+            'h_i'             : parameters['h_i'],
+            'q_i_k_j'         : parameters['q_i_k_j'][:, :, :, i]
+        }
+        acoo_data, acoo_row, acoo_col, bcoo_data, bcoo_row = total_matrix_assembly_vacuum_bcs_single_g_jit(global_settings, matrix_settings, parameters_eg)
+        diag_col = start_row
+
+        Arows.append(acoo_row + start_row)
+        Acols.append(acoo_col + diag_col)
+        Adata.append(acoo_data)
+        
+        brows.append(bcoo_row + start_row)
+        bdata.append(bcoo_data)
+        
+        for g_in in range(i):
+            parameters_eg_ds =  {
+                'sigma_t_i'       : parameters['sigma_t_i'][:, i], # does not matter
+                'sigma_s_k_i_gg'  : parameters['sigma_s_k_i_gg'][:, :, i, g_in],
+                'h_i'             : parameters['h_i'], 
+                'q_i_k_j'         : parameters['q_i_k_j'][:, :, :, i] # does not matter
+            }
+            D_data, D_row, D_col = total_downscatter_matrix_assembly_jit(global_settings, matrix_settings, parameters_eg_ds )
+    
+            Arows.append(D_row + start_row)
+            Acols.append(D_col + g_in * global_settings.n_dofs_per_eg)
+            Adata.append(D_data)
+
+    rows = np.concatenate(Arows)
+    cols = np.concatenate(Acols)
+    data = np.concatenate(Adata)
+    brow = np.concatenate(brows)
+    bdata = np.concatenate(bdata)
+
+    # Build sparse matrix and vector
+    A_total = scipy.sparse.coo_matrix((data, (rows, cols)), shape=(total_dofs, total_dofs))
+    b_total = scipy.sparse.coo_matrix((bdata, (brow, np.zeros_like(brow))), shape=(total_dofs, 1))
+
+    return A_total, b_total
 
 # =============================================================================================================================================================================================
 # |                                                                               Residual Functions                                                                                          |
