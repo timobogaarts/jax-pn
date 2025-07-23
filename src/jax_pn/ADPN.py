@@ -224,7 +224,7 @@ def _append_marshak_boundary_conditions(global_settings : GlobalSettings, matrix
     return jnp.array(Vcc_rows), jnp.array(Vcc_cols), jnp.array(Vcc_vals) , jnp.array(bcc_rows), jnp.array(bcc_vals)
 
 
-def _append_reflective_boundary_conditions(global_settings : Dict):
+def _append_reflective_boundary_conditions(global_settings : Dict, matrix_settings : MatrixSettings):
 
     n_moments       = global_settings.n_moments
     n_global_dofs   = global_settings.n_global_dofs
