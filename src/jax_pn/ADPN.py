@@ -57,7 +57,7 @@ def add_block_if(cond, block_fn, fallback_shape, dtypefloat, dtypeint):
     )
 
 
-
+@partial(jax.jit, static_argnums = (2))
 def local_matrix_PN_single_g(
         moment_k : int,
         elem_i   : int, 
@@ -129,6 +129,7 @@ def local_matrix_PN_single_g(
     
     return rows, cols, vals, row_b, b_values_j
 
+@partial(jax.jit, static_argnums = (2))
 def local_matrix_PN_scatter(moment_k : int,
         elem_i :int,
         global_settings : GlobalSettings, 
@@ -257,6 +258,9 @@ def append_boundary_conditions(global_settings, matrix_settings, boundary_condit
     return jnp.array(Vcc_rows), jnp.array(Vcc_cols), jnp.array(Vcc_vals) , jnp.array(bcc_rows), jnp.array(bcc_vals)
 
 
+vmap_local_matrix_PN_single_g = jax.jit(jax.vmap(jax.vmap(local_matrix_PN_single_g, in_axes=(0, None, None, None, None)), in_axes=(None, 0, None, None, None)), static_argnums=(2)) # static argnums are n_local_dofs and n_moments, which are required for JAX to compile the loops and allocate arrays
+vmap_local_matrix_PN_scatter  = jax.jit(jax.vmap(jax.vmap(local_matrix_PN_scatter, in_axes=(0, None, None, None, None)), in_axes=(None, 0, None, None, None)), static_argnums=(2)) # static argnums are n_local_dofs and n_moments, which are required for JAX to compile the loops and allocate arrays
+
 @partial(jax.jit, static_argnums = (0, 3, 4))
 def total_matrix_assembly_single_g(        
         global_settings : GlobalSettings,
@@ -281,6 +285,7 @@ def total_matrix_assembly_single_g(
 
         return vals_np, rows_np, cols_np, vals_b_np, rows_b_np        
 
+@partial(jax.jit, static_argnums=(0))
 def total_downscatter_matrix_assembly(
         global_settings : GlobalSettings,
         matrix_settings : Dict,
@@ -291,14 +296,6 @@ def total_downscatter_matrix_assembly(
         rows_all, cols_all, vals_all = vmap_local_matrix_PN_scatter(moments, elems, global_settings, matrix_settings, parameters)
         return vals_all.flatten(), rows_all.flatten(), cols_all.flatten()
 
-## Jitted versions
-
-local_matrix_PN_single_g_jit                       = jax.jit(local_matrix_PN_single_g, static_argnums= (2))     # static argnums are n_local_dofs and n_moments, which are required for JAX to compile the loops and allocate arrays
-vmap_local_matrix_PN_single_g                      = jax.jit(jax.vmap(jax.vmap(local_matrix_PN_single_g_jit, in_axes=(0, None, None, None, None)), in_axes=(None, 0, None, None, None)), static_argnums=(2)) # static argnums are n_local_dofs and n_moments, which are required for JAX to compile the loops and allocate arrays
-total_downscatter_matrix_assembly_jit              = jax.jit(total_downscatter_matrix_assembly, static_argnums=(0)) # static argnums are n_local_dofs and n_moments, which are required for JAX to compile the loops and allocate arrays
-
-local_matrix_PN_scatter_jit  = jax.jit(local_matrix_PN_scatter, static_argnums=(2)) # static argnums are n_local_dofs and n_moments, which are required for JAX to compile the loops and allocate arrays
-vmap_local_matrix_PN_scatter = jax.jit(jax.vmap(jax.vmap(local_matrix_PN_scatter_jit, in_axes=(0, None, None, None, None)), in_axes=(None, 0, None, None, None)), static_argnums=(2)) # static argnums are n_local_dofs and n_moments, which are required for JAX to compile the loops and allocate arrays
 
 def assemble_multigroup_system(global_settings : GlobalSettings,matrix_settings : MatrixSettings, parameters : Dict, boundary_condition_left : Literal["vacuum", "reflective"], boundary_condition_right : Literal["vacuum", "reflective"]):     # same as Neutron_Problem.assemble_multigroup_system, but without global state.
     
@@ -332,18 +329,19 @@ def assemble_multigroup_system(global_settings : GlobalSettings,matrix_settings 
         brows.append(bcoo_row + start_row)
         bdata.append(bcoo_data)
         
-        for g_in in range(i):
-            parameters_eg_ds =  {
-                'sigma_t_i'       : parameters['sigma_t_i'][:, i], # does not matter
-                'sigma_s_k_i_gg'  : parameters['sigma_s_k_i_gg'][:, :, i, g_in],
-                'h_i'             : parameters['h_i'], 
-                'q_i_k_j'         : parameters['q_i_k_j'][:, :, :, i] # does not matter
-            }
-            D_data, D_row, D_col = total_downscatter_matrix_assembly_jit(global_settings, matrix_settings, parameters_eg_ds )
-    
-            Arows.append(D_row + start_row)
-            Acols.append(D_col + g_in * global_settings.n_dofs_per_eg)
-            Adata.append(D_data)
+        for g_in in range(global_settings.n_energy_groups):
+            if g_in != i:
+                parameters_eg_ds =  {
+                    'sigma_t_i'       : parameters['sigma_t_i'][:, i], # does not matter
+                    'sigma_s_k_i_gg'  : parameters['sigma_s_k_i_gg'][:, :, i, g_in],
+                    'h_i'             : parameters['h_i'], 
+                    'q_i_k_j'         : parameters['q_i_k_j'][:, :, :, i] # does not matter
+                }
+                D_data, D_row, D_col = total_downscatter_matrix_assembly(global_settings, matrix_settings, parameters_eg_ds )
+        
+                Arows.append(D_row + start_row)
+                Acols.append(D_col + g_in * global_settings.n_dofs_per_eg)
+                Adata.append(D_data)
 
     rows = np.concatenate(Arows)
     cols = np.concatenate(Acols)
@@ -368,7 +366,10 @@ def local_residual_eg(
         global_settings : GlobalSettings, 
         matrix_settings : Dict,
         parameters : Dict,
-        solution   : jnp.ndarray):  
+        solution   : jnp.ndarray,
+        bc_left : Literal["vacuum", "reflective"],
+        bc_right : Literal["vacuum", "reflective"]
+        ):  
     
     n_local_dofs    = global_settings.n_local_dofs
     n_moments       = global_settings.n_moments
@@ -411,31 +412,43 @@ def local_residual_eg(
         residual = residual.at[:].add(residual_kp1)
         return residual
 
-    def left_dof_bc_vacuum(residual):
-        enforce_is = jnp.arange(1,n_moments,2) # number of left boundary conditions
-        start_idx  = n_dofs_per_eg * energy_group_g + n_global_dofs * n_moments
-        indices    = jnp.arange(len(enforce_is)) * 2 + start_idx
-        lagrange_multipliers = solution[indices] 
-        # left dof is first node of first element, so we add it at location 0 (MAGIC NUMBER)    
-        return residual.at[0].add( jnp.sum(leg_coeff_left[enforce_is, moment_k] * (2 * moment_k + 1) * lagrange_multipliers))
-    
-    def right_dof_bc_vacuum(residual):        
-        enforce_is = jnp.arange(1,n_moments,2) # number of right boundary conditions
-        start_idx  = n_dofs_per_eg * energy_group_g + n_global_dofs * n_moments + 1
-        indices    = jnp.arange(len(enforce_is)) * 2 + start_idx
-        lagrange_multipliers = solution[indices]                          
-        # right dof is second node of last element, so we add it at location 1  (MAGIC NUMBER)    
-        return residual.at[1].add( jnp.sum(leg_coeff_right[enforce_is, moment_k] * (2 * moment_k + 1) * lagrange_multipliers))
+    def left_dof_bc(residual):                
+        if bc_left == "reflective":                        
+            return jax.lax.cond(moment_k % 2 == 0, add_zero, lambda res: res.at[0].add(solution[n_dofs_per_eg * energy_group_g + n_global_dofs * n_moments + 2 * (moment_k // 2)]), residual) # if moment_k is even, add 1.0 to the first node of the first element            
+        elif bc_left == "vacuum":                
+            enforce_is = jnp.arange(1,n_moments,2) # number of left boundary conditions
+            start_idx  = n_dofs_per_eg * energy_group_g + n_global_dofs * n_moments
+            indices    = jnp.arange(len(enforce_is)) * 2 + start_idx
+            lagrange_multipliers = solution[indices]     
+            # left dof is first node of first element, so we add it at location 0 (MAGIC NUMBER)    
+            return residual.at[0].add( jnp.sum(leg_coeff_left[enforce_is, moment_k] * (2 * moment_k + 1) * lagrange_multipliers))
+        else:
+            raise ValueError(f"Unknown boundary condition for left boundary: {bc_left}")
+            return residual
+                    
+    def right_dof_bc(residual):    
+        if bc_left == "reflective":
+            return jax.lax.cond(moment_k % 2 == 0, add_zero, lambda res: res.at[1].add(solution[n_dofs_per_eg * energy_group_g + n_global_dofs * n_moments + 2 * (moment_k // 2) + 1]), residual) # if moment_k is even, add 1.0 to the first node of the first element                
+        elif bc_right == "vacuum":
+            enforce_is = jnp.arange(1,n_moments,2) # number of right boundary conditions
+            start_idx  = n_dofs_per_eg * energy_group_g + n_global_dofs * n_moments + 1
+            indices    = jnp.arange(len(enforce_is)) * 2 + start_idx
+            lagrange_multipliers = solution[indices]                          
+            # right dof is second node of last element, so we add it at location 1  (MAGIC NUMBER)    
+            return residual.at[1].add( jnp.sum(leg_coeff_right[enforce_is, moment_k] * (2 * moment_k + 1) * lagrange_multipliers))
+        else:
+            raise ValueError(f"Unknown boundary condition for right boundary: {bc_right}")
+            return residual
     
     indices_ik = global_index(energy_group_g,moment_k, spatial_global_i)    
     
     residual = (mass_matrix @ solution[indices_ik]) * (sigma_t_i[elem_i, energy_group_g]) * h_i[elem_i]
 
-    residual = jax.lax.cond(moment_k > 0,              add_minus_one, add_zero, residual) # if moment_k > 0,     add the k - 1 block, else do nothing
-    residual = jax.lax.cond(moment_k < n_moments - 1,  add_plus_one, add_zero,  residual) # if moment_k < N_max, add the k + 1 block, else do nothing    
+    residual = jax.lax.cond(moment_k > 0,              add_minus_one, add_zero, residual ) # if moment_k > 0,     add the k - 1 block, else do nothing
+    residual = jax.lax.cond(moment_k < n_moments - 1,  add_plus_one,  add_zero,  residual) # if moment_k < N_max, add the k + 1 block, else do nothing    
 
-    residual = jax.lax.cond( (elem_i == 0) ,                              left_dof_bc_vacuum, add_zero, residual)  # if elem_i == 0, apply left BC
-    residual = jax.lax.cond( (elem_i == global_settings.n_elements - 1), right_dof_bc_vacuum, add_zero, residual)  # if elem_i == n_elements, apply right BC
+    residual = jax.lax.cond( (elem_i == 0) ,                             left_dof_bc, add_zero, residual)  # if elem_i == 0, apply left BC
+    residual = jax.lax.cond( (elem_i == global_settings.n_elements - 1), right_dof_bc, add_zero, residual)  # if elem_i == n_elements, apply right BC
 
     def scatter_contribution(g, acc):
         indices_i_k = global_index(g, moment_k, spatial_global_i)
@@ -448,39 +461,48 @@ def local_residual_eg(
 
     return residual - b_values_j
 
-def residual_bc_marshak_eg(energy_group_g : int, global_settings : GlobalSettings, matrix_settings : Dict, solution : jnp.ndarray):
-    
-    enforced_l = jnp.arange(1, global_settings.n_moments, 2) # number of left boundary conditions
+@partial(jax.jit, static_argnums = (1, 4, 5))
+def residual_bc(energy_group_g : int, global_settings : GlobalSettings, matrix_settings : Dict, solution : jnp.ndarray, bc_left : Literal["vacuum", "reflective"], bc_right : Literal["vacuum", "reflective"]):
     residual   = jnp.zeros(global_settings.n_moments)
-
-    dof_eg_offset = energy_group_g * global_settings.n_dofs_per_eg    
-    
-    all_l = jnp.arange(global_settings.n_moments)
-
-    start_idx = dof_eg_offset
+    enforced_l = jnp.arange(1, global_settings.n_moments, 2) # number of left boundary conditions    
+    dof_eg_offset = energy_group_g * global_settings.n_dofs_per_eg        
     n_solution_l = jnp.arange(global_settings.n_moments) * global_settings.n_global_dofs    
-
-    solution_left_indices = start_idx + global_settings.left_dof + n_solution_l
-    solution_right_indices = start_idx + global_settings.right_dof + n_solution_l
-
-    solution_left_all_l  = solution[solution_left_indices]
-    solution_right_all_l = solution[solution_right_indices]
-
-    residual = residual.at[::2].add( jnp.sum(matrix_settings.leg_coeff_left[enforced_l, :]   * (2 * all_l[None, :] + 1) * solution_left_all_l[None,:] , axis=1))
-    residual = residual.at[1::2].add( jnp.sum(matrix_settings.leg_coeff_right[enforced_l, :] * (2 * all_l[None, :] + 1) * solution_right_all_l[None,:] , axis=1))
+    
+    if bc_left  == "vacuum":                                
+        all_l = jnp.arange(global_settings.n_moments)
+        solution_left_indices = dof_eg_offset + global_settings.left_dof + n_solution_l                
+        solution_left_all_l  = solution[solution_left_indices]        
+        residual = residual.at[::2].add( jnp.sum(matrix_settings.leg_coeff_left[enforced_l, :]   * (2 * all_l[None, :] + 1) * solution_left_all_l[None,:] , axis=1))
+    elif bc_left == "reflective":        
+        solution_left_indices_r = dof_eg_offset + global_settings.left_dof + enforced_l * global_settings.n_global_dofs
+        solution_left_all_l_r   = solution[solution_left_indices_r]
+        residual = residual.at[::2].add(solution_left_all_l_r)
+    else:
+        raise ValueError(f"Unknown boundary condition for left boundary: {bc_left}")
+    
+    if bc_right == "vacuum":
+        all_l = jnp.arange(global_settings.n_moments)
+        solution_right_indices = dof_eg_offset + global_settings.right_dof + n_solution_l
+        solution_right_all_l = solution[solution_right_indices]
+        residual = residual.at[1::2].add( jnp.sum(matrix_settings.leg_coeff_right[enforced_l, :] * (2 * all_l[None, :] + 1) * solution_right_all_l[None,:] , axis=1))
+    elif bc_right == "reflective":
+        solution_right_indices_r = dof_eg_offset + global_settings.right_dof + enforced_l * global_settings.n_global_dofs
+        solution_right_all_l_r   = solution[solution_right_indices_r]
+        residual = residual.at[1::2].add(solution_right_all_l_r)
+    else:
+        raise ValueError(f"Unknown boundary condition for right boundary: {bc_right}")
     
     return residual
 
-vmap_local_residual_PN_eg = jax.jit(jax.vmap(jax.vmap(jax.vmap(local_residual_eg, in_axes=(0, None, None, None, None, None, None)), in_axes=(None, 0, None, None, None, None, None)), in_axes=(None, None, 0, None, None, None, None)), static_argnums=(3)) # static argnums are n_local_dofs and n_moments, which are required for JAX to compile the loops and allocate arrays
-residual_bc_marshak_eg_jit = jax.jit(residual_bc_marshak_eg, static_argnums=(1)) # static argnum is global_settings, which is required for JAX to compile the loops and allocate arrays
+vmap_local_residual_PN_eg = jax.jit(jax.vmap(jax.vmap(jax.vmap(local_residual_eg, in_axes=(0, None, None, None, None, None, None, None, None)), in_axes=(None, 0, None, None, None, None, None, None, None)), in_axes=(None, None, 0, None, None, None, None, None, None)), static_argnums=(3,7,8)) # static argnums are n_local_dofs and n_moments, which are required for JAX to compile the loops and allocate arrays
 
 
-def residualPN(global_settings : GlobalSettings, matrix_settings, parameters_eg, solution):    
+@partial(jax.jit, static_argnums=(0,4,5))
+def residualPN(global_settings : GlobalSettings, matrix_settings, parameters_eg, solution, bc_left : Literal["vacuum", "reflective"], bc_right : Literal["vacuum", "reflective"]):    
     moments = jnp.arange(global_settings.n_moments)
     elems   = jnp.arange(global_settings.n_elements)
     
-    n_moments     = global_settings.n_moments    
-    n_global_dofs = global_settings.n_global_dofs
+    n_moments     = global_settings.n_moments        
     n_groups      = global_settings.n_energy_groups
 
     eg = jnp.arange(n_groups)
@@ -492,7 +514,9 @@ def residualPN(global_settings : GlobalSettings, matrix_settings, parameters_eg,
         global_settings,
         matrix_settings,
         parameters_eg,
-        solution
+        solution,
+        bc_left,
+        bc_right
     )    
     global_residual = jnp.zeros_like(solution)
 
@@ -505,18 +529,17 @@ def residualPN(global_settings : GlobalSettings, matrix_settings, parameters_eg,
             global_dof_indices = matrix_settings.elem_dof_matrix + offset_k
             global_residual    = global_residual.at[global_dof_indices].add(local_residuals[:, k, g, :])
         
-        bcs = residual_bc_marshak_eg_jit(
+        bcs = residual_bc(
             g,
             global_settings,
             matrix_settings,            
-            solution,            
+            solution,     
+            bc_left, 
+            bc_right       
         )    
         global_residual = global_residual.at[offset_g + global_settings.n_global_dofs * n_moments : offset_g + global_settings.n_global_dofs * n_moments + n_moments].add(bcs)
 
     return global_residual
-
-residualPN_jit = jax.jit(residualPN, static_argnums=(0,)) # static argnum is global_settings, which is required for JAX to compile the loops and allocate arrays
-
 
 class ADPN_Problem(PN_Problem):
     def __init__(self, *args, **kwargs):
@@ -612,7 +635,7 @@ class ADPN_Problem(PN_Problem):
             'q_i_k_j'         : self.jax_q_i_k_j[:, :, :, energy_group_out] # not actually used
         }
 
-        vals, rows, cols =  total_downscatter_matrix_assembly_jit(self.global_settings, self.matrix_settings, parameters_eg)
+        vals, rows, cols =  total_downscatter_matrix_assembly(self.global_settings, self.matrix_settings, parameters_eg)
         return vals, rows, cols, (self.dofs_per_eg, self.dofs_per_eg)
 
     def assemble_multigroup_system(self, bc_left, bc_right, n_energy_groups=None, parameters_eg = None):
@@ -628,9 +651,7 @@ class ADPN_Problem(PN_Problem):
             self.jax_sigma_t = parameters_eg['sigma_t_i']
             self.jax_sigma_s = parameters_eg['sigma_s_k_i_gg']
             self.jax_h_i     = parameters_eg['h_i']
-            self.jax_q_i_k_j = parameters_eg['q_i_k_j']
-        
-
+            self.jax_q_i_k_j = parameters_eg['q_i_k_j']    
 
         result = super().assemble_multigroup_system(bc_left, bc_right, n_energy_groups)
 
