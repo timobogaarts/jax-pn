@@ -15,6 +15,7 @@ from .PN import legendre_coeff_matrix, PN_Problem
 from .Neutron import Neutron_Problem, interpolate_solution
 from functools import cached_property
 from dataclasses import dataclass
+from functools import partial
 
 
 
@@ -38,7 +39,6 @@ class MatrixSettings:
     leg_coeff_left  : jnp.ndarray # Legendre coefficients for the left boundary condition, shape (n_moments, n_moments)
     leg_coeff_right : jnp.ndarray # Legendre coefficients for the right boundary condition, shape (n_moments, n_moments)
 
-#@jax.tree_util.register_pytree_node_class
 
 # =============================================================================================================================================================================================
 # |                                                                                Matrix Assembly Functions                                                                                  |
@@ -174,170 +174,103 @@ def local_matrix_PN_scatter(moment_k : int,
 
 
 
-def _append_reflective_marshak_boundary_conditions(global_settings : GlobalSettings, matrix_settings : Dict):
-    n_moments       = global_settings.n_moments
-    n_global_dofs   = global_settings.n_global_dofs
-    left_dof        = global_settings.left_dof
-    right_dof       = global_settings.right_dof
+@partial(jax.jit, static_argnums = (0, 5))
+def add_marshak(global_settings : GlobalSettings, matrix_settings : MatrixSettings, enforce_i : int, enforce_dof : int, bc_number : int, mu_sign : bool):
 
-    leg_coeff_left  = matrix_settings.leg_coeff_left    
-    leg_coeff_right = matrix_settings.leg_coeff_right    
-
-    bc_offset =n_global_dofs * n_moments 
+    Vcc_rows = [] 
+    Vcc_cols = []
+    Vcc_vals = []
     
+    bc_offset = global_settings.n_global_dofs * global_settings.n_moments
+
+    leg_matrix = matrix_settings.leg_coeff_left if mu_sign else matrix_settings.leg_coeff_right
+
+    for l in range(global_settings.n_moments): 
+        index_dof = l * global_settings.n_global_dofs + enforce_dof
+
+        Vcc_rows.append(bc_offset + bc_number )
+        Vcc_cols.append(index_dof)
+        Vcc_vals.append(leg_matrix[enforce_i, l] * (2 * l + 1))
+
+        Vcc_rows.append(index_dof)
+        Vcc_cols.append(bc_offset + bc_number )
+        Vcc_vals.append(leg_matrix[enforce_i, l] * (2 * l + 1))
+
+    return Vcc_rows, Vcc_cols, Vcc_vals, [], [] # no bcc contribution in this case, since we are not enforcing a value at the boundary, but rather a flux (i.e. the marshak condition)
+
+@partial(jax.jit, static_argnums = (0, 5))
+def add_reflective(global_settings : GlobalSettings, matrix_settings : MatrixSettings, enforce_i : int, enforce_dof : int, bc_number : int, mu_sign : bool):
+
+    Vcc_rows = [] 
+    Vcc_cols = []
+    Vcc_vals = []
+    bc_offset            = global_settings.n_global_dofs * global_settings.n_moments
+
+    l_index_dof = enforce_i * global_settings.n_global_dofs + enforce_dof    
+    # Reflective
+    Vcc_rows.append(bc_offset + bc_number )
+    Vcc_cols.append(l_index_dof)
+    Vcc_vals.append(1.0)
+        
+    Vcc_rows.append(l_index_dof)
+    Vcc_cols.append(bc_offset + bc_number)
+    Vcc_vals.append(1.0)                
+
+    return Vcc_rows, Vcc_cols, Vcc_vals, [], [] # no bcc contribution in this case, since we are not enforcing a value at the boundary, but rather a flux (i.e. the marshak condition)
+
+@partial(jax.jit, static_argnums = (0, 2, 3))
+def append_boundary_conditions(global_settings, matrix_settings, boundary_condition_left : Literal["vacuum", "reflective"], boundary_condition_right : Literal["vacuum", "reflective"]):        
     Vcc_rows = []
     Vcc_cols = []
     Vcc_vals = []
     bcc_rows = []
     bcc_vals = []
+    i_bc = 0    
+    for enforce_i in range(1, global_settings.n_moments, 2): 
+        if boundary_condition_left == "vacuum":
+            Vcc_rows_i, Vcc_cols_i, Vcc_vals_i, bcc_rows_i, bcc_vals_i = add_marshak(global_settings, matrix_settings, enforce_i, global_settings.left_dof, i_bc, True)
+        elif boundary_condition_left == "reflective":
+            Vcc_rows_i, Vcc_cols_i, Vcc_vals_i, bcc_rows_i, bcc_vals_i = add_reflective(global_settings, matrix_settings, enforce_i, global_settings.left_dof, i_bc, True)
+        else:
+            raise ValueError(f"Unknown boundary condition for left boundary: {boundary_condition_left}")
+        
+        Vcc_rows.extend(Vcc_rows_i)
+        Vcc_cols.extend(Vcc_cols_i)
+        Vcc_vals.extend(Vcc_vals_i)
+        bcc_rows.extend(bcc_rows_i)
+        bcc_vals.extend(bcc_vals_i)
 
-    i_bc = 0 
+        if  boundary_condition_right == "vacuum":
+            Vcc_rows_j, Vcc_cols_j, Vcc_vals_j, bcc_rows_j, bcc_vals_j = add_marshak(  global_settings, matrix_settings, enforce_i, global_settings.right_dof, i_bc + 1, False)
+        elif boundary_condition_right == "reflective":
+            Vcc_rows_j, Vcc_cols_j, Vcc_vals_j, bcc_rows_j, bcc_vals_j = add_reflective(global_settings, matrix_settings, enforce_i, global_settings.right_dof, i_bc + 1, False)
+        else:
+            raise ValueError(f"Unknown boundary condition for right boundary: {boundary_condition_right}")
+        Vcc_rows.extend(Vcc_rows_j)
+        Vcc_cols.extend(Vcc_cols_j)
+        Vcc_vals.extend(Vcc_vals_j)
+        bcc_rows.extend(bcc_rows_j)
+        bcc_vals.extend(bcc_vals_j)
+        
+        i_bc +=2        
     
-    for enforce_i in range(1, n_moments, 2): # number of boundary conditions = group * len(range(1, settings.n_moments, 2))            
-        index_left_dof_group = enforce_i * n_global_dofs + left_dof
-        
-        # Reflective
-        Vcc_rows.append(bc_offset + i_bc + 0)
-        Vcc_cols.append(index_left_dof_group)
-        Vcc_vals.append(1.0)
-        
-        Vcc_rows.append(index_left_dof_group)
-        Vcc_cols.append(bc_offset + i_bc + 0)
-        Vcc_vals.append(1.0)                
-
-        bcc_rows.append(bc_offset + i_bc + 0)
-        bcc_vals.append(0.0)
-
-        # Marshak
-        for l in range(n_moments):                                            
-            index_right_dof_group = l * n_global_dofs + right_dof
-
-            # VCC contribution
-            Vcc_rows.append(bc_offset + i_bc + 1)
-            Vcc_cols.append(index_right_dof_group)
-            Vcc_vals.append(leg_coeff_right[enforce_i, l] * (2 * l + 1))
-
-            # VCC^T contribution            
-            Vcc_rows.append(index_right_dof_group)
-            Vcc_cols.append(bc_offset + i_bc + 1)
-            Vcc_vals.append(leg_coeff_right[enforce_i, l] * (2 * l + 1))            
-        
-        bcc_rows.append(bc_offset + i_bc + 1)
-        bcc_vals.append(0.0)
-
-        i_bc += 2   
-
     return jnp.array(Vcc_rows), jnp.array(Vcc_cols), jnp.array(Vcc_vals) , jnp.array(bcc_rows), jnp.array(bcc_vals)
 
 
-def _append_marshak_boundary_conditions(global_settings : GlobalSettings, matrix_settings : Dict):
-        
-    n_moments       = global_settings.n_moments
-    n_global_dofs   = global_settings.n_global_dofs
-    left_dof        = global_settings.left_dof
-    right_dof       = global_settings.right_dof
+@partial(jax.jit, static_argnums = (0, 3, 4))
+def total_matrix_assembly_single_g(        
+        global_settings : GlobalSettings,
+        matrix_settings : MatrixSettings,
+        parameters : Dict, 
+        boundary_condition_left : Literal["vacuum", "reflective"],
+        boundary_condition_right : Literal["vacuum", "reflective"]
+        ): 
 
-    leg_coeff_left  = matrix_settings.leg_coeff_left
-    leg_coeff_right = matrix_settings.leg_coeff_right    
-
-    bc_offset =n_global_dofs * n_moments 
-    
-    Vcc_rows = []
-    Vcc_cols = []
-    Vcc_vals = []
-    bcc_rows = []
-    bcc_vals = []
-
-    i_bc = 0 
-    
-    for enforce_i in range(1, n_moments, 2): # number of boundary conditions = group * len(range(1, settings.n_moments, 2))            
-        for l in range(n_moments):                                
-            index_left_dof_group = l * n_global_dofs + left_dof
-            index_right_dof_group = l * n_global_dofs + right_dof
-
-            # VCC contribution
-            Vcc_rows.append(bc_offset + i_bc + 0)
-            Vcc_cols.append(index_left_dof_group)
-            Vcc_vals.append(leg_coeff_left[enforce_i, l] * (2 * l + 1))
-
-            Vcc_rows.append(bc_offset + i_bc + 1)
-            Vcc_cols.append(index_right_dof_group)
-            Vcc_vals.append(leg_coeff_right[enforce_i, l] * (2 * l + 1))
-
-            # VCC^T contribution
-            Vcc_rows.append(index_left_dof_group)
-            Vcc_cols.append(bc_offset + i_bc + 0)
-            Vcc_vals.append(leg_coeff_left[enforce_i, l] * (2 * l + 1))                
-
-            Vcc_rows.append(index_right_dof_group)
-            Vcc_cols.append(bc_offset + i_bc + 1)
-            Vcc_vals.append(leg_coeff_right[enforce_i, l] * (2 * l + 1))
-            
-        bcc_rows.append(bc_offset + i_bc + 0)
-        bcc_vals.append(0.0)
-        bcc_rows.append(bc_offset + i_bc + 1)
-        bcc_vals.append(0.0)
-
-        i_bc += 2    
-    return jnp.array(Vcc_rows), jnp.array(Vcc_cols), jnp.array(Vcc_vals) , jnp.array(bcc_rows), jnp.array(bcc_vals)
-
-
-def _append_reflective_boundary_conditions(global_settings : Dict, matrix_settings : MatrixSettings):
-
-    n_moments       = global_settings.n_moments
-    n_global_dofs   = global_settings.n_global_dofs
-    left_dof        = global_settings.left_dof
-    right_dof       = global_settings.right_dof
-
-    bc_offset =n_global_dofs * n_moments 
-    
-    Vcc_rows = []
-    Vcc_cols = []
-    Vcc_vals = []
-    bcc_rows = []
-    bcc_vals = []
-
-    i_bc = 0 
-    
-    for enforce_i in range(1, n_moments, 2): # number of boundary conditions = group * len(range(1, settings.n_moments, 2))            
-        
-        index_left_dof_group = enforce_i * n_global_dofs + left_dof
-        index_right_dof_group = enforce_i * n_global_dofs + right_dof
-
-        Vcc_rows.append(bc_offset + i_bc + 0)
-        Vcc_cols.append(index_left_dof_group)
-        Vcc_vals.append(1.0)
-
-        Vcc_rows.append(bc_offset + i_bc + 1)
-        Vcc_cols.append(index_right_dof_group)
-        Vcc_vals.append(1.0)
-
-        Vcc_rows.append(index_left_dof_group)
-        Vcc_cols.append(bc_offset + i_bc + 0)
-        Vcc_vals.append(1.0)                
-
-        Vcc_rows.append(index_right_dof_group)
-        Vcc_cols.append(bc_offset + i_bc + 1)
-        Vcc_vals.append(1.0)
-        
-        bcc_rows.append(bc_offset + i_bc + 0)
-        bcc_vals.append(0.0)
-        bcc_rows.append(bc_offset + i_bc + 1)
-        bcc_vals.append(0.0)
-        i_bc += 2    
-    return jnp.array(Vcc_rows), jnp.array(Vcc_cols), jnp.array(Vcc_vals) , jnp.array(bcc_rows), jnp.array(bcc_vals)
-
-
-def total_matrix_assembly_vacuum_bcs_single_g(        
-        global_settings : Dict,
-        matrix_settings : Dict,
-        parameters : Dict        
-        ):                
         moments = jnp.arange(global_settings.n_moments)
         elems   = jnp.arange(global_settings.n_elements)                
         rows_all, cols_all, vals_all, rows_b, vals_b      = vmap_local_matrix_PN_single_g(moments, elems, global_settings, matrix_settings, parameters)                                                
 
-        Vcc_rows, Vcc_cols, Vcc_vals , bcc_rows, bcc_vals = marshak_jit(global_settings, matrix_settings)                            
+        Vcc_rows, Vcc_cols, Vcc_vals , bcc_rows, bcc_vals = append_boundary_conditions(global_settings, matrix_settings, boundary_condition_left, boundary_condition_right)
 
         vals_np = jnp.concatenate([vals_all.ravel(), Vcc_vals])        
         rows_np = jnp.concatenate([rows_all.ravel(), Vcc_rows])    
@@ -345,33 +278,8 @@ def total_matrix_assembly_vacuum_bcs_single_g(
 
         vals_b_np = jnp.concatenate([vals_b.ravel(), bcc_vals])
         rows_b_np = jnp.concatenate([rows_b.ravel(), bcc_rows])
-        
-        return vals_np, rows_np, cols_np, vals_b_np, rows_b_np#
 
-
-
-def total_matrix_assembly_reflective_bcs_single_g(
-        global_settings : Dict,
-        matrix_settings : Dict,
-        parameters : Dict        
-        ):
-                
-        moments = jnp.arange(global_settings.n_moments)
-        elems   = jnp.arange(global_settings.n_elements)        
-        
-        rows_all, cols_all, vals_all, rows_b, vals_b      = vmap_local_matrix_PN_single_g(moments, elems, global_settings, matrix_settings, parameters)                                                
-
-        Vcc_rows, Vcc_cols, Vcc_vals , bcc_rows, bcc_vals = reflective_marshak_jit(global_settings, matrix_settings)                            
-
-        vals_np = jnp.concatenate([vals_all.ravel(), Vcc_vals])        
-        rows_np = jnp.concatenate([rows_all.ravel(), Vcc_rows])    
-        cols_np = jnp.concatenate([cols_all.ravel(), Vcc_cols])        
-
-        vals_b_np = jnp.concatenate([vals_b.ravel(), bcc_vals])
-        rows_b_np = jnp.concatenate([rows_b.ravel(), bcc_rows])
-        
-        return vals_np, rows_np, cols_np, vals_b_np, rows_b_np#
-
+        return vals_np, rows_np, cols_np, vals_b_np, rows_b_np        
 
 def total_downscatter_matrix_assembly(
         global_settings : GlobalSettings,
@@ -384,21 +292,15 @@ def total_downscatter_matrix_assembly(
         return vals_all.flatten(), rows_all.flatten(), cols_all.flatten()
 
 ## Jitted versions
-marshak_jit                                        = jax.jit(_append_marshak_boundary_conditions, static_argnums=(0)) # static argnum is number of moments, which is required for JAX to compile the loops.
-reflective_jit                                     = jax.jit(_append_reflective_boundary_conditions, static_argnums=(0)) # static argnum is number of moments, which is required for JAX to compile the loops.
-reflective_marshak_jit                             = jax.jit(_append_reflective_marshak_boundary_conditions, static_argnums=(0)) # static argnum is number of moments, which is required for JAX to compile the loops.
+
 local_matrix_PN_single_g_jit                       = jax.jit(local_matrix_PN_single_g, static_argnums= (2))     # static argnums are n_local_dofs and n_moments, which are required for JAX to compile the loops and allocate arrays
 vmap_local_matrix_PN_single_g                      = jax.jit(jax.vmap(jax.vmap(local_matrix_PN_single_g_jit, in_axes=(0, None, None, None, None)), in_axes=(None, 0, None, None, None)), static_argnums=(2)) # static argnums are n_local_dofs and n_moments, which are required for JAX to compile the loops and allocate arrays
-total_matrix_assembly_vacuum_bcs_single_g_jit      = jax.jit(total_matrix_assembly_vacuum_bcs_single_g, static_argnums=(0)) # static argnums are n_local_dofs and n_moments, which are required for JAX to compile the loops and allocate arrays
-total_matrix_assembly_reflective_bcs_single_g_jit  = jax.jit(total_matrix_assembly_reflective_bcs_single_g, static_argnums=(0)) # static argnums are n_local_dofs and n_moments, which are required for JAX to compile the loops and allocate arrays
 total_downscatter_matrix_assembly_jit              = jax.jit(total_downscatter_matrix_assembly, static_argnums=(0)) # static argnums are n_local_dofs and n_moments, which are required for JAX to compile the loops and allocate arrays
 
 local_matrix_PN_scatter_jit  = jax.jit(local_matrix_PN_scatter, static_argnums=(2)) # static argnums are n_local_dofs and n_moments, which are required for JAX to compile the loops and allocate arrays
 vmap_local_matrix_PN_scatter = jax.jit(jax.vmap(jax.vmap(local_matrix_PN_scatter_jit, in_axes=(0, None, None, None, None)), in_axes=(None, 0, None, None, None)), static_argnums=(2)) # static argnums are n_local_dofs and n_moments, which are required for JAX to compile the loops and allocate arrays
 
-
-
-def assemble_multigroup_system(global_settings : GlobalSettings,matrix_settings : MatrixSettings, parameters : Dict):     # same as Neutron_Problem.assemble_multigroup_system, but without global state.
+def assemble_multigroup_system(global_settings : GlobalSettings,matrix_settings : MatrixSettings, parameters : Dict, boundary_condition_left : Literal["vacuum", "reflective"], boundary_condition_right : Literal["vacuum", "reflective"]):     # same as Neutron_Problem.assemble_multigroup_system, but without global state.
     
     total_dofs = global_settings.n_dofs_per_eg * global_settings.n_energy_groups        
 
@@ -420,7 +322,7 @@ def assemble_multigroup_system(global_settings : GlobalSettings,matrix_settings 
             'h_i'             : parameters['h_i'],
             'q_i_k_j'         : parameters['q_i_k_j'][:, :, :, i]
         }
-        acoo_data, acoo_row, acoo_col, bcoo_data, bcoo_row = total_matrix_assembly_vacuum_bcs_single_g_jit(global_settings, matrix_settings, parameters_eg)
+        acoo_data, acoo_row, acoo_col, bcoo_data, bcoo_row = total_matrix_assembly_single_g(global_settings, matrix_settings, parameters_eg, boundary_condition_left, boundary_condition_right)
         diag_col = start_row
 
         Arows.append(acoo_row + start_row)
@@ -670,7 +572,7 @@ class ADPN_Problem(PN_Problem):
     def set_additional_BC_equations_per_eg(self):
         return self.N_max + 1
         
-    def Assemble_Single_Energy_Group(self, energy_group : int, bc : Literal["vacuum"]):
+    def Assemble_Single_Energy_Group(self, energy_group : int, bc_left : Literal["vacuum", "reflective"], bc_right : Literal["vacuum", "reflective"]):
         """
         Assemble the DPN finite element matrix and right-hand side vector for a single energy group.
         
@@ -693,13 +595,12 @@ class ADPN_Problem(PN_Problem):
             'h_i'             : self.jax_h_i,
             'q_i_k_j'         : self.jax_q_i_k_j[:, :, :, energy_group]
         }
-        if bc == "vacuum":     
-            vals_np, rows_np, cols_np, vals_b_np, rows_b_np = total_matrix_assembly_vacuum_bcs_single_g_jit(self.global_settings, self.matrix_settings, parameters_eg)
-                      
-        elif bc == "reflective":
-            vals_np, rows_np, cols_np, vals_b_np, rows_b_np = total_matrix_assembly_reflective_bcs_single_g_jit(self.global_settings, self.matrix_settings, parameters_eg)
-        else:
-            raise ValueError(f"Unsupported boundary condition: {bc}. Only 'vacuum' is currently implemented.")
+        vals_np, rows_np, cols_np, vals_b_np, rows_b_np = total_matrix_assembly_single_g(
+            self.global_settings, 
+            self.matrix_settings, 
+            parameters_eg, 
+            bc_left, bc_right
+        )
         
         return vals_np, rows_np, cols_np, (self.dofs_per_eg, self.dofs_per_eg), vals_b_np, rows_b_np, np.zeros_like(rows_b_np), (self.dofs_per_eg, 1) 
         
@@ -714,7 +615,7 @@ class ADPN_Problem(PN_Problem):
         vals, rows, cols =  total_downscatter_matrix_assembly_jit(self.global_settings, self.matrix_settings, parameters_eg)
         return vals, rows, cols, (self.dofs_per_eg, self.dofs_per_eg)
 
-    def assemble_multigroup_system(self, bc, n_energy_groups=None, parameters_eg = None):
+    def assemble_multigroup_system(self, bc_left, bc_right, n_energy_groups=None, parameters_eg = None):
 
         backup_params = {
             'sigma_t_i'       : jnp.copy(self.jax_sigma_t),
@@ -731,10 +632,31 @@ class ADPN_Problem(PN_Problem):
         
 
 
-        result = super().assemble_multigroup_system(bc, n_energy_groups)
+        result = super().assemble_multigroup_system(bc_left, bc_right, n_energy_groups)
 
         self.jax_sigma_t = backup_params['sigma_t_i']
         self.jax_sigma_s = backup_params['sigma_s_k_i_gg']
         self.jax_h_i     = backup_params['h_i']     
         self.jax_q_i_k_j = backup_params['q_i_k_j']
         return result
+
+def legendre_coeff_matrix(L_max, a, b):
+    M = max(2*L_max, 50)  # Number of quadrature points for accuracy
+    
+    # Gauss-Legendre nodes and weights on [-1,1]
+    nodes, weights = leggauss(M)
+    
+    # Transform to [a,b]
+    x = 0.5 * (nodes * (b - a) + (b + a))
+    w = 0.5 * (b - a) * weights
+    
+    # Evaluate all P_i(x) for i=0..L_max-1, shape (L_max, M)
+    P = np.array([legendre(i)(x) for i in range(L_max)])
+    
+    # Now compute coeff matrix: integral P_i * P_j = sum_k w_k * P_i(x_k)*P_j(x_k)
+    # This is P @ diag(w) @ P.T but since w is 1D vector:
+    # Use broadcasting or matrix multiplication with weighting:
+    W = np.diag(w)
+    coeff = P @ W @ P.T
+    
+    return coeff

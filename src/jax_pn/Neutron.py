@@ -91,7 +91,7 @@ class Neutron_Problem:
         return cls(nodes, sigma_t, sigma_s, q, N_max, L_scat, element)
     
     @abc.abstractmethod
-    def Assemble_Single_Energy_Group(self, energy_group, bc):
+    def Assemble_Single_Energy_Group(self, energy_group, bc_left, bc_right):
         pass
 
     @abc.abstractmethod
@@ -105,7 +105,7 @@ class Neutron_Problem:
     def set_additional_BC_equations_per_eg(self):
         return 0
     
-    def assemble_multigroup_system(self, bc, n_energy_groups=None):
+    def assemble_multigroup_system(self, bc_left, bc_right, n_energy_groups=None):
         """
         Assemble the multigroup DPN finite element matrix and right-hand side vector for the 1D transport equation.
         
@@ -142,7 +142,7 @@ class Neutron_Problem:
             start_row =       i * self.dofs_per_eg
                         
             # Block-diagonal (single energy group)
-            acoo_data, acoo_row, acoo_col, acoo_shape, bcoo_data, bcoo_row, bcoo_col, bcoo_shape = self.Assemble_Single_Energy_Group(i, bc)            
+            acoo_data, acoo_row, acoo_col, acoo_shape, bcoo_data, bcoo_row, bcoo_col, bcoo_shape = self.Assemble_Single_Energy_Group(i, bc_left, bc_right)            
             diag_col = start_row
 
             Arows.append(acoo_row + start_row)
@@ -174,7 +174,7 @@ class Neutron_Problem:
         return A_total, b_total
         
     
-    def Solve_Multigroup_System(self, bc, n_energy_groups=None):
+    def Solve_Multigroup_System(self, bc_left, bc_right, n_energy_groups=None):
         """
         Solve the multigroup DPN system.
         
@@ -190,7 +190,7 @@ class Neutron_Problem:
         x: np.ndarray
             The solution vector.
         """
-        A, b = self.assemble_multigroup_system(bc, n_energy_groups)
+        A, b = self.assemble_multigroup_system(bc_left, bc_right, n_energy_groups)
         print("Solving system with shape:", A.shape, "and", b.shape[0], "equations.")
         self.solution =  spsolve(A.tocsr().astype(np.float64), b.tocsr().astype(np.float64))
         return self.solution
