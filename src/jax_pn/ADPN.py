@@ -173,6 +173,63 @@ def local_matrix_PN_scatter(moment_k : int,
     return add_mass_block()
 
 
+
+def _append_reflective_marshak_boundary_conditions(global_settings : GlobalSettings, matrix_settings : Dict):
+    n_moments       = global_settings.n_moments
+    n_global_dofs   = global_settings.n_global_dofs
+    left_dof        = global_settings.left_dof
+    right_dof       = global_settings.right_dof
+
+    leg_coeff_left  = matrix_settings.leg_coeff_left    
+    leg_coeff_right = matrix_settings.leg_coeff_right    
+
+    bc_offset =n_global_dofs * n_moments 
+    
+    Vcc_rows = []
+    Vcc_cols = []
+    Vcc_vals = []
+    bcc_rows = []
+    bcc_vals = []
+
+    i_bc = 0 
+    
+    for enforce_i in range(1, n_moments, 2): # number of boundary conditions = group * len(range(1, settings.n_moments, 2))            
+        index_left_dof_group = enforce_i * n_global_dofs + left_dof
+        
+        # Reflective
+        Vcc_rows.append(bc_offset + i_bc + 0)
+        Vcc_cols.append(index_left_dof_group)
+        Vcc_vals.append(1.0)
+        
+        Vcc_rows.append(index_left_dof_group)
+        Vcc_cols.append(bc_offset + i_bc + 0)
+        Vcc_vals.append(1.0)                
+
+        bcc_rows.append(bc_offset + i_bc + 0)
+        bcc_vals.append(0.0)
+
+        # Marshak
+        for l in range(n_moments):                                            
+            index_right_dof_group = l * n_global_dofs + right_dof
+
+            # VCC contribution
+            Vcc_rows.append(bc_offset + i_bc + 1)
+            Vcc_cols.append(index_right_dof_group)
+            Vcc_vals.append(leg_coeff_right[enforce_i, l] * (2 * l + 1))
+
+            # VCC^T contribution            
+            Vcc_rows.append(index_right_dof_group)
+            Vcc_cols.append(bc_offset + i_bc + 1)
+            Vcc_vals.append(leg_coeff_right[enforce_i, l] * (2 * l + 1))            
+        
+        bcc_rows.append(bc_offset + i_bc + 1)
+        bcc_vals.append(0.0)
+
+        i_bc += 2   
+
+    return jnp.array(Vcc_rows), jnp.array(Vcc_cols), jnp.array(Vcc_vals) , jnp.array(bcc_rows), jnp.array(bcc_vals)
+
+
 def _append_marshak_boundary_conditions(global_settings : GlobalSettings, matrix_settings : Dict):
         
     n_moments       = global_settings.n_moments
@@ -216,10 +273,11 @@ def _append_marshak_boundary_conditions(global_settings : GlobalSettings, matrix
             Vcc_cols.append(bc_offset + i_bc + 1)
             Vcc_vals.append(leg_coeff_right[enforce_i, l] * (2 * l + 1))
             
-            bcc_rows.append(bc_offset + i_bc + 0)
-            bcc_vals.append(0.0)
-            bcc_rows.append(bc_offset + i_bc + 1)
-            bcc_vals.append(0.0)
+        bcc_rows.append(bc_offset + i_bc + 0)
+        bcc_vals.append(0.0)
+        bcc_rows.append(bc_offset + i_bc + 1)
+        bcc_vals.append(0.0)
+
         i_bc += 2    
     return jnp.array(Vcc_rows), jnp.array(Vcc_cols), jnp.array(Vcc_vals) , jnp.array(bcc_rows), jnp.array(bcc_vals)
 
@@ -303,7 +361,7 @@ def total_matrix_assembly_reflective_bcs_single_g(
         
         rows_all, cols_all, vals_all, rows_b, vals_b      = vmap_local_matrix_PN_single_g(moments, elems, global_settings, matrix_settings, parameters)                                                
 
-        Vcc_rows, Vcc_cols, Vcc_vals , bcc_rows, bcc_vals = reflective_jit(global_settings, matrix_settings)                            
+        Vcc_rows, Vcc_cols, Vcc_vals , bcc_rows, bcc_vals = reflective_marshak_jit(global_settings, matrix_settings)                            
 
         vals_np = jnp.concatenate([vals_all.ravel(), Vcc_vals])        
         rows_np = jnp.concatenate([rows_all.ravel(), Vcc_rows])    
@@ -328,6 +386,7 @@ def total_downscatter_matrix_assembly(
 ## Jitted versions
 marshak_jit                                        = jax.jit(_append_marshak_boundary_conditions, static_argnums=(0)) # static argnum is number of moments, which is required for JAX to compile the loops.
 reflective_jit                                     = jax.jit(_append_reflective_boundary_conditions, static_argnums=(0)) # static argnum is number of moments, which is required for JAX to compile the loops.
+reflective_marshak_jit                             = jax.jit(_append_reflective_marshak_boundary_conditions, static_argnums=(0)) # static argnum is number of moments, which is required for JAX to compile the loops.
 local_matrix_PN_single_g_jit                       = jax.jit(local_matrix_PN_single_g, static_argnums= (2))     # static argnums are n_local_dofs and n_moments, which are required for JAX to compile the loops and allocate arrays
 vmap_local_matrix_PN_single_g                      = jax.jit(jax.vmap(jax.vmap(local_matrix_PN_single_g_jit, in_axes=(0, None, None, None, None)), in_axes=(None, 0, None, None, None)), static_argnums=(2)) # static argnums are n_local_dofs and n_moments, which are required for JAX to compile the loops and allocate arrays
 total_matrix_assembly_vacuum_bcs_single_g_jit      = jax.jit(total_matrix_assembly_vacuum_bcs_single_g, static_argnums=(0)) # static argnums are n_local_dofs and n_moments, which are required for JAX to compile the loops and allocate arrays
@@ -467,7 +526,7 @@ def local_residual_eg(
         return residual.at[1].add( jnp.sum(leg_coeff_right[enforce_is, moment_k] * (2 * moment_k + 1) * lagrange_multipliers))
     
     indices_ik = global_index(energy_group_g,moment_k, spatial_global_i)    
-    #residual = (mass_matrix @ solution[indices_ik]) * (sigma_t_i[elem_i, energy_group_g] - sigma_s_k_i_gg[elem_i, moment_k, energy_group_g, energy_group_g]) * h_i[elem_i]
+    
     residual = (mass_matrix @ solution[indices_ik]) * (sigma_t_i[elem_i, energy_group_g]) * h_i[elem_i]
 
     residual = jax.lax.cond(moment_k > 0,              add_minus_one, add_zero, residual) # if moment_k > 0,     add the k - 1 block, else do nothing
@@ -476,8 +535,6 @@ def local_residual_eg(
     residual = jax.lax.cond( (elem_i == 0) ,                              left_dof_bc_vacuum, add_zero, residual)  # if elem_i == 0, apply left BC
     residual = jax.lax.cond( (elem_i == global_settings.n_elements - 1), right_dof_bc_vacuum, add_zero, residual)  # if elem_i == n_elements, apply right BC
 
-    # Downcatter Terms (not effecient: goes beyond the maximum L order in the scatter matrix):
-    # upscatter could be trivially used as well by extending the loop to include all energy groups (and ensure you remove the contribution for the current energy group g)
     def scatter_contribution(g, acc):
         indices_i_k = global_index(g, moment_k, spatial_global_i)
         term = -(mass_matrix @ solution[indices_i_k]) * sigma_s_k_i_gg[elem_i, moment_k, energy_group_g, g] * h_i[elem_i]
